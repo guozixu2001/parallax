@@ -232,6 +232,10 @@ class BaseExecutor:
         """Prepares inputs for ShardedModel from a batch of decode requests."""
 
     @abstractmethod
+    def _prepare_speculative_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
+        """Prepares inputs for ShardedModel from a batch of speculative decoding requests."""
+
+    @abstractmethod
     def _gen_token_id_from_hidden(self, hidden_states) -> Tuple[int, Any]:
         """
         Inplace modifies hidden_states.
@@ -360,22 +364,29 @@ class BaseExecutor:
 
         prefill_reqs: List[Request] = []
         decode_reqs: List[Request] = []
+        speculative_reqs: List[Request] = []
         for req in batched_requests:
             if req.is_prefill:
                 prefill_reqs.append(req)
             elif req.is_decoding:
                 decode_reqs.append(req)
+            elif req.is_speculative:
+                speculative_reqs.append(req)
         prefill_batch = self._prepare_prefill_batch(prefill_reqs)
         decode_batch = self._prepare_decode_batch(decode_reqs)
-        if prefill_batch is None and decode_batch is None:
+        speculative_batch = self._prepare_speculative_batch(speculative_reqs)
+        if prefill_batch is None and decode_batch is None and speculative_batch is None:
             return None
         if prefill_batch is not None:
             logger.debug(f"Prepared prefill batch with {len(prefill_batch['requests'])} requests.")
         if decode_batch is not None:
             logger.debug(f"Prepared decode batch with {len(decode_batch['requests'])} requests.")
+        if speculative_batch is not None:
+            logger.debug(f"Prepared speculative batch with {len(speculative_batch['requests'])} requests.")
         return {
             "prefill_batch": prefill_batch,
             "decode_batch": decode_batch,
+            "speculative_batch": speculative_batch,
         }
 
     def prepare_next_batch_requests(
@@ -415,7 +426,24 @@ class BaseExecutor:
                                 pre_length : pre_length + true_length, :
                             ]
                         pre_length += true_length
+                    elif src_request.is_speculative:
+                        # Speculative verification: K+1 tokens (draft + bonus)
+                        # Extract K+1 hidden states for this request
+                        draft_tokens = getattr(src_request, 'draft_token_ids', None)
+                        if draft_tokens:
+                            num_tokens = len(draft_tokens) + 1  # K draft + 1 bonus
+                        else:
+                            num_tokens = 1  # Fallback to 1 if no draft tokens
+
+                        if hidden_states.ndim == 3:
+                            hidden_state_for_req = hidden_states[i, :num_tokens, :]
+                        else:
+                            hidden_state_for_req = hidden_states[
+                                pre_length : pre_length + num_tokens, :
+                            ]
+                        pre_length += num_tokens
                     else:
+                        # Regular decode: 1 token
                         if hidden_states.ndim == 3:
                             hidden_state_for_req = hidden_states[i, :, :]
                         else:
@@ -517,8 +545,8 @@ class BaseExecutor:
             try:
                 prepared_inputs_dict = self.prepare_batch_inputs(batch_to_process)
 
-                # We will process prefill and decode batches separately for now
-                for batch_type in ["prefill_batch", "decode_batch"]:
+                # We will process prefill, decode, and speculative batches separately
+                for batch_type in ["prefill_batch", "decode_batch", "speculative_batch"]:
                     if prepared_inputs_dict and prepared_inputs_dict.get(batch_type):
                         prepared_inputs = prepared_inputs_dict[batch_type]
 
@@ -527,7 +555,7 @@ class BaseExecutor:
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
                         # Update metrics with per-layer latency sample (throttled by decode steps)
-                        if batch_type == "decode_batch":
+                        if batch_type in ["decode_batch", "speculative_batch"]:
                             try:
                                 self._decode_steps_since_metric += len(prepared_inputs["requests"])
                                 if (

@@ -23,7 +23,21 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
 
     We apply explicit KV cache handling and passing in `offset` directly from Request.
     This version returns the new K and V states for external caching.
+
+    Attributes:
+        use_paged_attention: If True, use paged attention (default). If False, use pure SDPA.
     """
+
+    def __init__(self, args: ModelArgs, use_paged_attention: bool = True):
+        """
+        Initialize ParallaxQwen3Attention.
+
+        Args:
+            args: ModelArgs configuration
+            use_paged_attention: Whether to use paged attention (True) or pure SDPA (False)
+        """
+        super().__init__(args)
+        self.use_paged_attention = use_paged_attention
 
     def __call__(
         self,
@@ -65,7 +79,17 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         )
         values_new = values_new.reshape(batch, target_len, self.n_kv_heads, -1)
 
-        key_cache_global, value_cache_global = cache.get_cache()
+        # For ContinuousKVCache (speculative decoding), cache is already the layer cache object
+        # For PagedKVCache (normal mode), cache has a get_cache() method that returns global cache
+        if hasattr(cache, 'get_cache') and not isinstance(cache, type):
+            # Paged cache or ContinuousKVCache with get_cache method
+            key_cache_global, value_cache_global = cache.get_cache()
+        else:
+            # cache might be the data directly (shouldn't happen, but defensive)
+            from parallax_utils.logging_config import get_logger
+            logger = get_logger(__name__)
+            logger.error(f"Unexpected cache type: {type(cache)}, has get_cache: {hasattr(cache, 'get_cache')}")
+            raise ValueError(f"Expected cache object, got {type(cache)}")
 
         queries_rotated_list = []
         keys_rotated_list = []
@@ -89,137 +113,177 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         queries_rotated = mx.concatenate(queries_rotated_list, axis=0)
         keys_rotated = mx.concatenate(keys_rotated_list, axis=0)
 
-        block_size = key_cache_global.shape[3]
-
-        reshape_and_cache(
-            keys_rotated.transpose(0, 2, 1, 3),
-            values_new,
-            key_cache_global,
-            value_cache_global,
-            block_tables,
-            context_lengths,
-            block_size,
-            slot_mapping=slot_mapping,
-        )
-
         # 3. Compute Attention
-        if target_len == 1:
-            # Decode Phase: Use Paged Attention Kernel
-            output = paged_attention_v1(
-                queries_rotated,
+        if self.use_paged_attention:
+            # === Paged Attention Mode (default) ===
+            block_size = key_cache_global.shape[3]
+
+            reshape_and_cache(
+                keys_rotated.transpose(0, 2, 1, 3),
+                values_new,
                 key_cache_global,
                 value_cache_global,
                 block_tables,
                 context_lengths,
                 block_size,
-                self.scale,
-                self.n_kv_heads,
+                slot_mapping=slot_mapping,
             )
-            output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
-        else:
-            # Prefill Phase: Need to attend to both cached prefix and new tokens
-            # Check if any request has prefix cache
-            has_prefix_cache = prefix_lens is not None and bool(mx.any(prefix_lens > 0))
 
-            logger.debug("Prefill phase: prefix_lens=%s", prefix_lens)
-            logger.debug("Prefill phase: has_prefix_cache=%s", has_prefix_cache)
-
-            if has_prefix_cache:
-                # Read cached prefix KV from paged cache and concatenate with new KV
-                # key_cache_global: (num_layers, num_blocks, n_kv_heads, head_dim, block_size)
-                # value_cache_global: (num_layers, num_blocks, n_kv_heads, block_size, head_dim)
-                output_list = []
-                for i in range(batch):
-                    prefix_len = int(prefix_lens[i])
-                    q_i = queries_rotated[i : i + 1]  # (1, n_heads, target_len, head_dim)
-                    k_new_i = keys_rotated[i : i + 1]  # (1, n_kv_heads, target_len, head_dim)
-                    v_new_i = values_new[i : i + 1].transpose(
-                        0, 2, 1, 3
-                    )  # (1, n_kv_heads, target_len, head_dim)
-
-                    if prefix_len > 0:
-                        # Read prefix KV from cache using block_table
-                        block_table_i = block_tables[i]  # (max_blocks,)
-
-                        # Gather prefix tokens from paged cache
-                        prefix_k_list = []
-                        prefix_v_list = []
-                        for pos in range(prefix_len):
-                            block_idx = pos // block_size
-                            offset_in_block = pos % block_size
-                            physical_block = int(block_table_i[block_idx])
-                            # key_cache_global[0]: (num_blocks, n_kv_heads, block_size, head_dim)
-                            # value_cache_global[0]: (num_blocks, n_kv_heads, block_size, head_dim_v)
-                            k_token = key_cache_global[
-                                0, physical_block, :, offset_in_block, :
-                            ]  # (n_kv_heads, head_dim)
-                            v_token = value_cache_global[
-                                0, physical_block, :, offset_in_block, :
-                            ]  # (n_kv_heads, head_dim_v)
-                            prefix_k_list.append(k_token)
-                            prefix_v_list.append(v_token)
-
-                        # Stack prefix KV: (prefix_len, n_kv_heads, head_dim)
-                        prefix_k = mx.stack(
-                            prefix_k_list, axis=0
-                        )  # (prefix_len, n_kv_heads, head_dim)
-                        prefix_v = mx.stack(
-                            prefix_v_list, axis=0
-                        )  # (prefix_len, n_kv_heads, head_dim)
-
-                        # Reshape and transpose for attention
-                        prefix_k = prefix_k.transpose(1, 0, 2)[
-                            None, ...
-                        ]  # (1, n_kv_heads, prefix_len, head_dim)
-                        prefix_v = prefix_v.transpose(1, 0, 2)[
-                            None, ...
-                        ]  # (1, n_kv_heads, prefix_len, head_dim)
-
-                        # Concatenate prefix and new KV
-                        k_full = mx.concatenate(
-                            [prefix_k, k_new_i], axis=2
-                        )  # (1, n_kv_heads, prefix_len + target_len, head_dim)
-                        v_full = mx.concatenate(
-                            [prefix_v, v_new_i], axis=2
-                        )  # (1, n_kv_heads, prefix_len + target_len, head_dim)
-                    else:
-                        k_full = k_new_i
-                        v_full = v_new_i
-
-                    # Compute attention for this request
-                    # Need to create proper causal mask for the full sequence
-                    full_len = k_full.shape[2]
-                    # Correct causal mask: position j can attend to positions 0..j
-                    row_indices = mx.arange(target_len)[:, None] + prefix_len  # actual positions
-                    col_indices = mx.arange(full_len)[None, :]
-                    causal_mask = mx.where(col_indices <= row_indices, 0.0, float("-inf"))
-                    causal_mask = causal_mask[None, None, :, :].astype(
-                        q_i.dtype
-                    )  # (1, 1, target_len, full_len)
-
-                    out_i = scaled_dot_product_attention(
-                        q_i,
-                        k_full,
-                        v_full,
-                        scale=self.scale,
-                        mask=causal_mask,
-                        cache=None,
-                    )
-                    output_list.append(out_i)
-
-                output = mx.concatenate(output_list, axis=0)
-                output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
-            else:
-                # No prefix cache, use standard self-attention on local data only
-                output = scaled_dot_product_attention(
+            if target_len == 1:
+                # Decode Phase: Use Paged Attention Kernel
+                output = paged_attention_v1(
                     queries_rotated,
-                    keys_rotated,
-                    values_new.transpose(0, 2, 1, 3),
-                    scale=self.scale,
-                    mask=mask,
-                    cache=None,
+                    key_cache_global,
+                    value_cache_global,
+                    block_tables,
+                    context_lengths,
+                    block_size,
+                    self.scale,
+                    self.n_kv_heads,
                 )
                 output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
+            else:
+                # Prefill Phase: Need to attend to both cached prefix and new tokens
+                # Check if any request has prefix cache
+                has_prefix_cache = prefix_lens is not None and bool(mx.any(prefix_lens > 0))
+
+                logger.debug("Prefill phase: prefix_lens=%s", prefix_lens)
+                logger.debug("Prefill phase: has_prefix_cache=%s", has_prefix_cache)
+
+                if has_prefix_cache:
+                    # Read cached prefix KV from paged cache and concatenate with new KV
+                    # key_cache_global: (num_layers, num_blocks, n_kv_heads, head_dim, block_size)
+                    # value_cache_global: (num_layers, num_blocks, n_kv_heads, block_size, head_dim)
+                    output_list = []
+                    for i in range(batch):
+                        prefix_len = int(prefix_lens[i])
+                        q_i = queries_rotated[i : i + 1]  # (1, n_heads, target_len, head_dim)
+                        k_new_i = keys_rotated[i : i + 1]  # (1, n_kv_heads, target_len, head_dim)
+                        v_new_i = values_new[i : i + 1].transpose(
+                            0, 2, 1, 3
+                        )  # (1, n_kv_heads, target_len, head_dim)
+
+                        if prefix_len > 0:
+                            # Read prefix KV from cache using block_table
+                            block_table_i = block_tables[i]  # (max_blocks,)
+
+                            # Gather prefix tokens from paged cache
+                            prefix_k_list = []
+                            prefix_v_list = []
+                            for pos in range(prefix_len):
+                                block_idx = pos // block_size
+                                offset_in_block = pos % block_size
+                                physical_block = int(block_table_i[block_idx])
+                                # key_cache_global[0]: (num_blocks, n_kv_heads, block_size, head_dim)
+                                # value_cache_global[0]: (num_blocks, n_kv_heads, block_size, head_dim_v)
+                                k_token = key_cache_global[
+                                    0, physical_block, :, offset_in_block, :
+                                ]  # (n_kv_heads, head_dim)
+                                v_token = value_cache_global[
+                                    0, physical_block, :, offset_in_block, :
+                                ]  # (n_kv_heads, head_dim_v)
+                                prefix_k_list.append(k_token)
+                                prefix_v_list.append(v_token)
+
+                            # Stack prefix KV: (prefix_len, n_kv_heads, head_dim)
+                            prefix_k = mx.stack(
+                                prefix_k_list, axis=0
+                            )  # (prefix_len, n_kv_heads, head_dim)
+                            prefix_v = mx.stack(
+                                prefix_v_list, axis=0
+                            )  # (prefix_len, n_kv_heads, head_dim)
+
+                            # Reshape and transpose for attention
+                            prefix_k = prefix_k.transpose(1, 0, 2)[
+                                None, ...
+                            ]  # (1, n_kv_heads, prefix_len, head_dim)
+                            prefix_v = prefix_v.transpose(1, 0, 2)[
+                                None, ...
+                            ]  # (1, n_kv_heads, prefix_len, head_dim)
+
+                            # Concatenate prefix and new KV
+                            k_full = mx.concatenate(
+                                [prefix_k, k_new_i], axis=2
+                            )  # (1, n_kv_heads, prefix_len + target_len, head_dim)
+                            v_full = mx.concatenate(
+                                [prefix_v, v_new_i], axis=2
+                            )  # (1, n_kv_heads, prefix_len + target_len, head_dim)
+                        else:
+                            k_full = k_new_i
+                            v_full = v_new_i
+
+                        # Compute attention for this request
+                        # Need to create proper causal mask for the full sequence
+                        full_len = k_full.shape[2]
+                        # Correct causal mask: position j can attend to positions 0..j
+                        row_indices = mx.arange(target_len)[:, None] + prefix_len  # actual positions
+                        col_indices = mx.arange(full_len)[None, :]
+                        causal_mask = mx.where(col_indices <= row_indices, 0.0, float("-inf"))
+                        causal_mask = causal_mask[None, None, :, :].astype(
+                            q_i.dtype
+                        )  # (1, 1, target_len, full_len)
+
+                        out_i = scaled_dot_product_attention(
+                            q_i,
+                            k_full,
+                            v_full,
+                            scale=self.scale,
+                            mask=causal_mask,
+                            cache=None,
+                        )
+                        output_list.append(out_i)
+
+                    output = mx.concatenate(output_list, axis=0)
+                    output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
+                else:
+                    # No prefix cache, use standard self-attention on local data only
+                    output = scaled_dot_product_attention(
+                        queries_rotated,
+                        keys_rotated,
+                        values_new.transpose(0, 2, 1, 3),
+                        scale=self.scale,
+                        mask=mask,
+                        cache=None,
+                    )
+                    output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
+        else:
+            # === Pure SDPA Mode (for speculative decoding) ===
+            # Use ContinuousKVCache which handles append/rollback internally
+            if cache is not None:
+                # ContinuousKVCache.append() expects (batch, num_tokens, n_kv_heads, head_dim)
+                # keys_rotated: (batch, n_heads, target_len, head_dim) - need to transpose and slice
+                # values_new: (batch, target_len, n_kv_heads, head_dim)
+
+                # For keys, we only need n_kv_heads (not n_heads), so select first n_kv_heads
+                # keys_rotated[:, :self.n_kv_heads, :, :] gives (batch, n_kv_heads, target_len, head_dim)
+                # Then transpose to (batch, target_len, n_kv_heads, head_dim) for append
+                keys_for_cache = keys_rotated[:, :self.n_kv_heads, :, :].transpose(0, 2, 1, 3)
+                values_for_cache = values_new  # Already (batch, target_len, n_kv_heads, head_dim)
+
+                # Append to cache (cache handles concatenation internally)
+                cache.append(keys_for_cache, values_for_cache)
+
+                # Get updated cache for attention
+                key_cache_for_attn, value_cache_for_attn = cache.get_cache()
+            else:
+                # No cache, use current KV only
+                # Select first n_kv_heads from keys_rotated
+                keys_for_attn = keys_rotated[:, :self.n_kv_heads, :, :].transpose(0, 2, 1, 3)
+                values_for_attn = values_new.transpose(0, 2, 1, 3)
+
+                key_cache_for_attn = keys_for_attn
+                value_cache_for_attn = values_for_attn
+
+            # Compute attention using SDPA
+            output = scaled_dot_product_attention(
+                queries_rotated,
+                key_cache_for_attn,
+                value_cache_for_attn,
+                scale=self.scale,
+                mask=mask,
+                cache=None,  # Cache already updated
+            )
+            output = output.transpose(0, 2, 1, 3).reshape(batch, target_len, -1)
 
         return self.o_proj(output)
 
@@ -229,9 +293,9 @@ class ParallaxQwen3Block(MLXQwen3Block):
     This version handles the KV cache explicitly and returns new K and V states.
     """
 
-    def __init__(self, args: ModelArgs, layer_idx: int, local_layer_idx: int):
+    def __init__(self, args: ModelArgs, layer_idx: int, local_layer_idx: int, use_paged_attention: bool = True):
         super().__init__(args)
-        self.self_attn = ParallaxQwen3Attention(args)
+        self.self_attn = ParallaxQwen3Attention(args, use_paged_attention=use_paged_attention)
         self.layer_idx = layer_idx
         self.local_layer_idx = local_layer_idx
 

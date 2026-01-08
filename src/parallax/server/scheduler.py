@@ -322,12 +322,15 @@ class Scheduler:
         # Prefill candidates: preserve admission order via OrderedDict iteration
         prefill_candidates = []
         decode_candidates = []
+        speculative_candidates = []
         for req in self._running_requests.values():
             if req.ready_for_next_step:
                 if req.is_prefill:
                     prefill_candidates.append(req)
                 elif req.is_decoding:
                     decode_candidates.append(req)
+                elif req.is_speculative:
+                    speculative_candidates.append(req)
 
         # 1) Fill with prefills first
         for req in prefill_candidates:
@@ -339,7 +342,20 @@ class Scheduler:
             batch.append(req)
             inflight_tokens += cost
 
-        # 2) Fill remaining with ready decodes
+        # 2) Fill with speculative decoding requests
+        for req in speculative_candidates:
+            if len(batch) >= self.micro_batch_size:
+                break
+            # Speculative decoding cost: draft_tokens + verify_tokens
+            # Default to 1 if num_draft_tokens not set
+            # TODO(guozixu): refine speculative cost model
+            cost = getattr(req, "num_draft_tokens", 1)
+            if cost + inflight_tokens > self.max_num_tokens_per_batch:
+                continue
+            batch.append(req)
+            inflight_tokens += cost
+
+        # 3) Fill remaining with ready decodes
         for req in decode_candidates:
             if len(batch) >= self.micro_batch_size:
                 break
@@ -355,9 +371,15 @@ class Scheduler:
             r.last_updated_time = time.time()
 
         if batch:
+            batch_info = [
+                f"{r.request_id}:{r.status.value}" for r in batch
+            ]
             logger.debug(
-                "Form batch selected=%s inflight_tokens=%d",
-                [f"{r.request_id}:{r.status}, ready:{r.ready_for_next_step}" for r in batch],
+                "Form batch selected=%s inflight_tokens=%d (prefill=%d, speculative=%d, decode=%d)",
+                batch_info,
                 inflight_tokens,
+                len([r for r in batch if r.is_prefill]),
+                len([r for r in batch if r.is_speculative]),
+                len([r for r in batch if r.is_decoding]),
             )
         return batch
