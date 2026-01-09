@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import mlx.core as mx
 
+from parallax.utils.utils import create_causal_mask
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -29,7 +30,7 @@ class DraftGenerator:
         Initialize DraftGenerator.
 
         Args:
-            draft_model: Draft model instance (small model)
+            draft_model: Draft model instance
             cache_manager: Cache manager for draft model
             max_draft_tokens: Maximum number of draft tokens to generate
             dtype: Data type for model operations
@@ -53,7 +54,6 @@ class DraftGenerator:
             request_id: Request ID
             input_ids: Input token IDs to prefill
         """
-        from parallax.utils.utils import create_causal_mask
 
         logger.debug(f"Prefilling draft cache for {request_id} with {len(input_ids)} tokens")
 
@@ -121,11 +121,11 @@ class DraftGenerator:
             current_len = self.cache_manager.get_context_length(request_id)
             context_lengths = mx.array([current_len], dtype=mx.int32)
 
-            # Draft model forward (SDPA only, no paged attention)
+            # Draft model forward
             draft_logits = self.draft_model(
                 h_or_tokens=current_input,
-                cache=layer_caches,  # Pass list of KVCache objects
-                mask=None,  # Decode phase doesn't need mask
+                cache=layer_caches,
+                mask=None,
                 block_tables=None,  # Draft model doesn't use paged attention
                 context_lengths=context_lengths,  # Needed for RoPE positioning
                 slot_mapping=None,
@@ -139,9 +139,6 @@ class DraftGenerator:
             logger.debug(
                 f"Draft token {step + 1}/{num_tokens}: {next_token} for request {request_id}"
             )
-
-            # Note: Cache is automatically updated by the model's attention layer
-            # via cache.append() in qwen3.py line 264, which increments current_length
 
             # Update input for next iteration
             current_input = mx.array([[next_token]])

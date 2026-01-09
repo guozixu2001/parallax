@@ -22,8 +22,7 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
     """A custom attention module for Parallax, extending the Qwen3 Attention class.
 
     We apply explicit KV cache handling and passing in `offset` directly from Request.
-    This version supports both paged attention (for normal inference) and mlx_lm's
-    KVCache pattern (for speculative decoding).
+    Support both paged attention (for normal inference) and sdpa (for speculative decoding).
 
     Attributes:
         use_paged_attention: If True, use paged attention. If False, delegate to MLXQwen3Attention.

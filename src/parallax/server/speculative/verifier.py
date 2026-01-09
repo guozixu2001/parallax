@@ -15,7 +15,7 @@ def verify_draft_tokens(hidden_states: mx.array, draft_tokens: List[int]) -> Tup
     """
     Verify K draft tokens and generate 1 bonus token.
 
-    This is the core verification algorithm for speculative decoding.
+    This is verification algorithm for speculative decoding.
     It checks each draft token sequentially against the target model's prediction.
 
     Args:
@@ -28,13 +28,6 @@ def verify_draft_tokens(hidden_states: mx.array, draft_tokens: List[int]) -> Tup
         Tuple of (num_accepted, bonus_token):
             - num_accepted: Number of draft tokens accepted (0 to K)
             - bonus_token: Newly sampled token at position K
-
-    Example:
-        >>> draft_tokens = [10, 20, 30, 40]
-        >>> hidden_states = model.forward([...])  # (5, vocab_size)
-        >>> num_accepted, bonus_token = verify_draft_tokens(hidden_states, draft_tokens)
-        >>> print(f"Accepted {num_accepted}/{len(draft_tokens)} tokens")
-        >>> print(f"Bonus token: {bonus_token}")
     """
     K = len(draft_tokens)
 
@@ -48,13 +41,11 @@ def verify_draft_tokens(hidden_states: mx.array, draft_tokens: List[int]) -> Tup
     # Verify each draft token sequentially
     for k in range(K):
         # Get target model's prediction at position k
-        target_logit = hidden_states[k]  # (vocab_size,)
-
-        # Get the token with maximum probability
+        target_logit = hidden_states[k]
         target_token = int(mx.argmax(target_logit))
 
         if target_token == draft_tokens[k]:
-            # Accept: Draft model's prediction matches target model
+            # Accept
             num_accepted += 1
         else:
             # Reject: Mismatch found, reject this and all remaining drafts
@@ -63,10 +54,7 @@ def verify_draft_tokens(hidden_states: mx.array, draft_tokens: List[int]) -> Tup
             )
             break
 
-    # Generate bonus token at position num_accepted
-    # If all tokens accepted: bonus at position K
-    # If some rejected: bonus at position where we first disagreed
-    bonus_logit = hidden_states[num_accepted]  # (vocab_size,)
+    bonus_logit = hidden_states[num_accepted]
     bonus_token = int(mx.argmax(bonus_logit))
 
     logger.debug(
