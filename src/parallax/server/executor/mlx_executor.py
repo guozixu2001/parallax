@@ -199,7 +199,7 @@ class MLXExecutor(BaseExecutor):
         if self.enable_speculative:
             logger.info("Speculative decoding enabled")
 
-            # Use SpeculativeCacheManager (ContinuousKVCache) for target model
+            # Use SpeculativeCacheManager (KVCache) for target model
             self.cache_manager = SpeculativeCacheManager(
                 num_layers=self.num_shard_layers,
                 max_seq_len=max_sequence_length or 2048,
@@ -870,11 +870,10 @@ class MLXExecutor(BaseExecutor):
                         block_tables=None,
                         context_lengths=None,
                         slot_mapping=None,
-                    )
+                 )
 
-                    # Update draft cache length
-                    for layer_cache in draft_layer_caches:
-                        layer_cache.current_length = len(req.input_ids)
+                    # Note: KVCache tracks offset internally via update_and_fetch()
+                    # No need to manually set current_length
 
                 # Generate K draft tokens using DraftGenerator
                 try:
@@ -960,7 +959,7 @@ class MLXExecutor(BaseExecutor):
                 h_or_tokens_list.append(req.hidden_states)
 
             # Pre-allocate slots for K+1 tokens (K draft + 1 bonus)
-            # Note: In ContinuousKVCache mode, append_slot is a no-op
+            # Note: In KVCache mode, append_slot is a no-op
             # The actual KV will be appended during model forward
             for _ in range(len(draft_tokens) + 1):
                 self.cache_manager.append_slot(req.request_id)
@@ -1018,7 +1017,7 @@ class MLXExecutor(BaseExecutor):
         # For single request, get cache objects (not tuples)
         request_id = valid_requests[0].request_id if len(valid_requests) == 1 else None
         if request_id:
-            # Get list of ContinuousKVCache objects for each layer
+            # Get list of KVCache objects for each layer
             layer_caches = self.cache_manager.request_caches.get(request_id)
             cache_for_model = layer_caches
 
@@ -1129,7 +1128,7 @@ class MLXExecutor(BaseExecutor):
         # Generate slot_mapping for prefill (only for NEW tokens, starting from prefix_len)
         # Only for paged cache - skip for speculative decoding (continuous cache)
         if self.enable_speculative:
-            # Speculative decoding uses ContinuousKVCache - no paged cache logic
+            # Speculative decoding uses KVCache - no paged cache logic
             slot_mapping_tensor = None
             block_tables_tensor = None
             context_lengths_tensor = mx.array(context_lengths_list, dtype=mx.int32)

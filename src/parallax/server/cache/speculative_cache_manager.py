@@ -1,12 +1,12 @@
 """
 Speculative Cache Manager for target model in speculative decoding.
-Uses ContinuousKVCache (concatenate-based) instead of paged KV cache.
+Uses mlx_lm's KVCache (concatenate-based) instead of paged KV cache.
 """
 
 from typing import Dict, List, Optional, Tuple
 import mlx.core as mx
 
-from parallax.server.cache.continuous_kv_cache import ContinuousKVCache
+from mlx_lm.models.cache import KVCache
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -16,7 +16,7 @@ class SpeculativeCacheManager:
     """
     Cache manager for speculative decoding target model.
 
-    Uses ContinuousKVCache (concatenate-based) instead of paged KV cache.
+    Uses mlx_lm's KVCache (concatenate-based) instead of paged KV cache.
     Manages KV cache at request level with rollback support.
     """
 
@@ -33,10 +33,10 @@ class SpeculativeCacheManager:
 
         Args:
             num_layers: Number of transformer layers
-            max_seq_len: Maximum sequence length
-            num_kv_heads: Number of key-value heads
-            head_dim: Dimension of each head
-            dtype: Data type for cache
+            max_seq_len: Maximum sequence length (not used by KVCache, kept for compatibility)
+            num_kv_heads: Number of key-value heads (not used by KVCache, kept for compatibility)
+            head_dim: Dimension of each head (not used by KVCache, kept for compatibility)
+            dtype: Data type for cache (not used by KVCache, kept for compatibility)
         """
         self.num_layers = num_layers
         self.max_seq_len = max_seq_len
@@ -46,7 +46,7 @@ class SpeculativeCacheManager:
 
         # Layer caches (not per-request, shared template)
         # We'll create per-request caches on demand
-        self.request_caches: Dict[str, List[ContinuousKVCache]] = {}
+        self.request_caches: Dict[str, List[KVCache]] = {}
 
         # For compatibility with paged cache interface
         self.needs_slots = False
@@ -77,16 +77,8 @@ class SpeculativeCacheManager:
             # Already allocated
             return True, 0
 
-        # Create ContinuousKVCache for each layer
-        layer_caches = [
-            ContinuousKVCache(
-                max_seq_len=self.max_seq_len,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                dtype=self.dtype,
-            )
-            for _ in range(self.num_layers)
-        ]
+        # Create KVCache for each layer (mlx_lm's KVCache doesn't need initialization params)
+        layer_caches = [KVCache() for _ in range(self.num_layers)]
 
         self.request_caches[request_id] = layer_caches
 
@@ -110,13 +102,15 @@ class SpeculativeCacheManager:
     ):
         """
         Append KV pairs for a specific layer and request.
+        Note: This method is not used with mlx_lm's KVCache pattern.
+        The cache is updated via update_and_fetch() in the attention layer.
 
         Args:
             request_id: Request ID
             layer_idx: Layer index
             keys: (batch, num_tokens, num_kv_heads, head_dim)
             values: (batch, num_tokens, num_kv_heads, head_dim)
-        """
+     """
         if request_id not in self.request_caches:
             raise ValueError(f"Request {request_id} not allocated")
 
@@ -126,14 +120,15 @@ class SpeculativeCacheManager:
         # Get layer cache
         layer_cache = self.request_caches[request_id][layer_idx]
 
-        # Append KV (cache.append() will update current_length internally)
-        layer_cache.append(keys, values)
+        # Note: With mlx_lm's KVCache, we don't manually append
+        # The cache is updated via update_and_fetch() in the attention layer
+        logger.warning("append_tokens() called but not used with mlx_lm's KVCache pattern")
 
     def append_slot(self, request_id: str) -> bool:
         """
         Allocate a slot for one more token (for compatibility with paged interface).
 
-        In ContinuousKVCache, we don't pre-allocate slots. This method
+        In KVCache, we don't pre-allocate slots. This method
         is provided for API compatibility and always returns True.
 
         Args:
@@ -170,7 +165,8 @@ class SpeculativeCacheManager:
             return None
 
         layer_cache = self.request_caches[request_id][layer_idx]
-        return layer_cache.get_cache()
+        # KVCache.state returns (keys, values) tuple
+        return layer_cache.state
 
     def get_all_caches(
         self, request_id: str
@@ -188,11 +184,11 @@ class SpeculativeCacheManager:
             return None
 
         return [
-            layer_cache.get_cache()
+          layer_cache.state
             for layer_cache in self.request_caches[request_id]
         ]
 
-    def get_caches(self) -> Optional[List["ContinuousKVCache"]]:
+    def get_caches(self) -> Optional[List[KVCache]]:
         """
         Get caches for the current batch.
 
@@ -201,14 +197,14 @@ class SpeculativeCacheManager:
         method for the batch processing API.
 
         Returns:
-            List of ContinuousKVCache objects for each layer,
+            List of KVCache objects for each layer,
             or None if no requests are allocated
         """
         if not self.request_caches:
             logger.debug("get_caches(): No requests allocated yet")
             return None
 
-        # Get the first request's cache objects (not tuples)
+      # Get the first request's cache objects (not tuples)
         first_request_id = next(iter(self.request_caches))
         caches = self.request_caches.get(first_request_id)
         logger.debug(
@@ -222,7 +218,7 @@ class SpeculativeCacheManager:
         Get current context length for a request.
 
         Args:
-            request_id: Request ID
+       request_id: Request ID
 
         Returns:
             Current context length, or 0 if request not found
@@ -235,7 +231,8 @@ class SpeculativeCacheManager:
         if not layer_caches:
             return 0
 
-        return layer_caches[0].current_length
+        # KVCache has __len__ method that returns offset
+        return len(layer_caches[0])
 
     def rollback_to_position(self, request_id: str, target_length: int):
         """
@@ -265,10 +262,13 @@ class SpeculativeCacheManager:
                 f"Target length must be >= 0, got {target_length}"
             )
 
-        # Rollback each layer cache
+        # Calculate how many tokens to trim
+        num_to_trim = current_length - target_length
+
+        # Rollback each layer cache using trim()
         for layer_idx in range(self.num_layers):
             layer_cache = self.request_caches[request_id][layer_idx]
-            layer_cache.rollback(target_length)
+            layer_cache.trim(num_to_trim)
 
         logger.debug(
             f"Rolled back request {request_id} from {current_length} to {target_length}"

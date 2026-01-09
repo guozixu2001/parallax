@@ -22,10 +22,11 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
     """A custom attention module for Parallax, extending the Qwen3 Attention class.
 
     We apply explicit KV cache handling and passing in `offset` directly from Request.
-    This version returns the new K and V states for external caching.
+    This version supports both paged attention (for normal inference) and mlx_lm's
+    KVCache pattern (for speculative decoding).
 
     Attributes:
-        use_paged_attention: If True, use paged attention (default). If False, use pure SDPA.
+        use_paged_attention: If True, use paged attention. If False, delegate to MLXQwen3Attention.
     """
 
     def __init__(self, args: ModelArgs, use_paged_attention: bool = True):
@@ -34,7 +35,7 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
 
         Args:
             args: ModelArgs configuration
-            use_paged_attention: Whether to use paged attention (True) or pure SDPA (False)
+            use_paged_attention: Whether to use paged attention (True) or mlx_lm's pattern (False)
         """
         super().__init__(args)
         self.use_paged_attention = use_paged_attention
@@ -65,6 +66,11 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         Returns:
             output: (batch, target_len, hidden_dim) - Output hidden states.
         """
+        # If not using paged attention, delegate to mlx_lm's original implementation
+        if not self.use_paged_attention:
+            return super().__call__(x, mask=mask, cache=cache)
+
+        # Otherwise, use paged attention logic
         batch, target_len, _ = x.shape
 
         queries_new = self.q_proj(x)
@@ -97,11 +103,12 @@ class ParallaxQwen3Attention(MLXQwen3Attention):
         for i in range(batch):
             # For decode phase: position is context_length - 1
             # For prefill phase: position starts at prefix_len (skip cached prefix tokens)
-            if target_len == 1:
-                # Decode phase
+            if target_len == 1 and context_lengths is not None:
+                # Decode phase (target_len=1 AND context_lengths provided)
                 current_pos = int(context_lengths[i]) - 1
             else:
-                # Prefill phase - start from prefix_len if using prefix cache
+                # Prefill phase (target_len>1 OR context_lengths=None)
+                # Start from prefix_len if using prefix cache
                 current_pos = int(prefix_lens[i]) if prefix_lens is not None else 0
             q_slice = queries_new[i : i + 1]
             k_slice = keys_new[i : i + 1]

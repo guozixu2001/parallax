@@ -69,7 +69,7 @@ class DraftGenerator:
         initial_cache_len = self.cache_manager.get_context_length(request_id)
 
         for step in range(num_tokens):
-            # Get KV cache objects for this request (ContinuousKVCache objects)
+            # Get KV cache objects for this request (KVCache objects)
             if request_id not in self.cache_manager.request_caches:
                 logger.error(f"No cache found for request {request_id}")
                 break
@@ -83,7 +83,7 @@ class DraftGenerator:
             # Draft model forward (SDPA only, no paged attention)
             draft_logits = self.draft_model(
                 h_or_tokens=current_input,
-                cache=layer_caches,  # Pass list of ContinuousKVCache objects
+                cache=layer_caches,  # Pass list of KVCache objects
                 mask=None,  # Decode phase doesn't need mask
                 block_tables=None,  # Draft model doesn't use paged attention
                 context_lengths=context_lengths,  # Needed for RoPE positioning
