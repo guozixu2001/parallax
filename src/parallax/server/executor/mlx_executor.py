@@ -378,7 +378,7 @@ class MLXExecutor(BaseExecutor):
                         original_req.output_ids.append(bonus_token)
                         logger.debug(f"Added bonus token: {bonus_token}")
 
-                        # Remove rejected draft tokens)
+                        # Remove rejected draft tokens
                         new_length = original_length + num_accepted
                         # Rollback target cache
                         self.cache_manager.rollback_to_position(original_req.request_id, new_length)
@@ -399,7 +399,6 @@ class MLXExecutor(BaseExecutor):
                         logger.debug(
                             f"Rolled back draft cache for {req.request_id} to {draft_new_length}"
                         )
-
                         # Clear draft tokens
                         original_req.draft_token_ids = None
                         original_req.num_draft_tokens = 0
@@ -433,7 +432,6 @@ class MLXExecutor(BaseExecutor):
 
                     # detokenize and send to http server
                     if self.tp_rank == 0:
-                        # Determine tokens to send based on request type
                         if original_req.is_speculative and req.num_accepted_tokens > 0:
                             # Speculative decoding: send accepted draft tokens + bonus token
                             tokens_to_send = accepted_tokens + [bonus_token]
@@ -546,9 +544,8 @@ class MLXExecutor(BaseExecutor):
                     # Insert all full blocks from this prefill into the prefix cache
                     self.cache_manager.insert_full_blocks_to_cache(req.request_id)
 
-        # === Speculative Decoding: Last Peer Verification ===
+        # Speculative Decoding: Last Peer Verification
         is_speculative = any(req.is_speculative for req in requests) if requests else False
-
         if is_speculative and self.is_last_peer and return_decoded_tokens:
             # TODO(guozixu): using sampling_info
             sampling_info = SamplingBatchInfo.from_reqs(requests)
@@ -636,23 +633,20 @@ class MLXExecutor(BaseExecutor):
             try:
                 # Verify draft tokens and generate bonus token
                 num_accepted, bonus_token = verify_draft_tokens(logits, draft_tokens)
-
                 # Update request with verification results
                 req.num_accepted_tokens = num_accepted
                 req.next_token_id = bonus_token
-
                 logger.debug(
                     f"Request {req.request_id}: "
                     f"accepted {num_accepted}/{len(draft_tokens)} draft tokens, "
                     f"bonus_token={bonus_token}"
                 )
 
-                # Return bonus token as uint32 for consistency with normal decoding
+                # Return bonus token as uint32
                 results.append(mx.array([bonus_token], dtype=mx.uint32))
 
             except Exception as e:
                 logger.exception(f"Error verifying request {req.request_id}: {e}")
-                # Return default value
                 results.append(mx.array([0], dtype=mx.uint32))
 
         # Stack results: (batch, 1) - bonus_token for each request
@@ -670,19 +664,15 @@ class MLXExecutor(BaseExecutor):
 
     def _gen_token_id_from_hidden(self, hidden_states) -> Tuple[int, Any]:
         """
-        Extract token ID from hidden states (last peer only).
-
-        Args:
-            hidden_states: uint32 array containing single token ID
+        Inplace modifies hidden_states.
 
         Returns token_id, hidden_states
         """
+        assert hidden_states.dtype == mx.uint32, "Single node must generate an output_id."
         next_token_id = int(hidden_states[0])
-        if hidden_states.dtype != mx.int32:
-            hidden_states = hidden_states.astype(mx.int32)
+        hidden_states = hidden_states.astype(mx.int32)
         return next_token_id, hidden_states
 
-    # TODO(guozixu): check correctness
     def _prepare_next_single_request(
         self, request: Request, hidden_states: Any, token_prob: Optional[float] = None
     ) -> Request:
@@ -693,10 +683,6 @@ class MLXExecutor(BaseExecutor):
         - PREFILLING -> SPECULATIVE (after prefill completes)
         - SPECULATIVE -> SPECULATIVE (continue speculative decoding)
         """
-        # Import here to avoid circular dependency
-        from parallax.server.request import IntermediateRequest
-
-        # This peer is the last peer or a single node.
         if self.is_last_peer and self.is_first_peer:
             assert isinstance(
                 request, (InitialRequest, IntermediateRequest)
@@ -704,7 +690,6 @@ class MLXExecutor(BaseExecutor):
 
             next_token_id, hidden_states = self._gen_token_id_from_hidden(hidden_states)
 
-            # Determine next status based on current status and speculative mode
             if request.is_prefill and self.enable_speculative:
                 next_status = RequestStatus.SPECULATIVE
             elif request.is_speculative:
@@ -728,6 +713,7 @@ class MLXExecutor(BaseExecutor):
                 draft_token_ids=getattr(request, "draft_token_ids", None),
                 num_accepted_tokens=getattr(request, "num_accepted_tokens", 0),
             )
+
         if self.is_last_peer:
             # Last peer decodes a token and sends it back to the first peer.
             # The token is wrapped in an IntermediateRequest.
@@ -737,7 +723,6 @@ class MLXExecutor(BaseExecutor):
 
             next_token_id, hidden_states = self._gen_token_id_from_hidden(hidden_states)
 
-            # Determine next status based on current status and speculative mode
             if request.is_prefill and self.enable_speculative:
                 next_status = RequestStatus.SPECULATIVE
             elif request.is_speculative:
@@ -780,7 +765,7 @@ class MLXExecutor(BaseExecutor):
         if not batched_requests:
             return None
 
-        # === First Peer: Draft Phase ===
+        # First Peer: Draft Phase
         if self.is_first_peer and self.enable_speculative:
             logger.debug(
                 f"First peer: Generating draft tokens for {len(batched_requests)} requests"
@@ -832,7 +817,7 @@ class MLXExecutor(BaseExecutor):
             # Prepare for target model verification
             return self._prepare_verify_batch(valid_requests, draft_tokens_list)
 
-        # === Pipeline Peers: Verify Phase ===
+        # Pipeline Peers: Verify Phase
         else:
             logger.debug(
                 f"Pipeline peer: Preparing verification for {len(batched_requests)} requests"
@@ -893,14 +878,8 @@ class MLXExecutor(BaseExecutor):
             logger.warning("No valid requests after verify batch preparation")
             return None
 
-        # Pad inputs (if first peer)
+        # Pad inputs
         if self.is_first_peer:
-            from parallax.server.executor.mlx_executor import (
-                combine_padding_and_causal_masks,
-                create_causal_mask,
-                pad_inputs,
-            )
-
             padded_inputs, padding_mask = pad_inputs(
                 self.pad_token_id, h_or_tokens_list, self.dtype
             )
@@ -908,21 +887,15 @@ class MLXExecutor(BaseExecutor):
             # Create causal mask for K+1 tokens
             # For speculative verification, we need to attend to all cached tokens + new tokens
             max_len = max(len(tokens) for tokens in h_or_tokens_list)
-
-            # Get current cache length (number of tokens already in cache)
+            # Get current cache length
             request_id = valid_requests[0].request_id
             cache_len = self.cache_manager.get_context_length(request_id)
-
             # Total sequence length: cached tokens + new tokens
             total_len = cache_len + max_len
-
             # Create causal mask: new tokens can attend to all previous + current tokens
             # Shape: (max_len, total_len)
             causal_mask = create_causal_mask(max_len, total_len, self.dtype)
-
             # Expand padding mask to cover full sequence length
-            # padding_mask is (B, 1, 1, max_len), we need (B, 1, 1, total_len)
-            # The cached tokens are all valid (not padded), so we prepend ones
             if cache_len > 0:
                 batch_size = padding_mask.shape[0]
                 # Create mask for cached tokens (all valid)
@@ -944,16 +917,12 @@ class MLXExecutor(BaseExecutor):
         # For single request, get cache objects (not tuples)
         request_id = valid_requests[0].request_id if len(valid_requests) == 1 else None
         if request_id:
-            # Get list of KVCache objects for each layer
             layer_caches = self.cache_manager.request_caches.get(request_id)
             cache_for_model = layer_caches
-
-            # Get context lengths for RoPE positioning
-            # This is critical for correct position embeddings
             cache_len = self.cache_manager.get_context_length(request_id)
             context_lengths_tensor = mx.array([cache_len], dtype=mx.int32)
         else:
-            # Batch mode - need to handle multiple requests
+            # TODO(guozixu): Batch mode - need to handle multiple requests
             # For now, return None and let model handle it
             cache_for_model = None
             context_lengths_tensor = None
@@ -964,7 +933,7 @@ class MLXExecutor(BaseExecutor):
             "mask": mask,
             "requests": valid_requests,
             "block_tables": None,  # Not used in speculative mode
-            "context_lengths": context_lengths_tensor,  # Needed for cache management
+            "context_lengths": context_lengths_tensor,
             "slot_mapping": None,  # Not used in speculative mode
             "prefix_lens": (
                 mx.array([cache_len], dtype=mx.int32) if request_id else None
