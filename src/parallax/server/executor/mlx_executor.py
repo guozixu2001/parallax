@@ -91,7 +91,7 @@ class MLXExecutor(BaseExecutor):
         # Pipe communication
         conn: Optional[Any] = None,
         # Speculative Decoding Configs
-        draft_model: Optional[str] = None,
+        draft_model_repo: Optional[str] = None,
         draft_start_layer: Optional[int] = 0,
         draft_end_layer: Optional[int] = None,
         num_draft_tokens: Optional[int] = 3,
@@ -180,16 +180,11 @@ class MLXExecutor(BaseExecutor):
             self.num_shard_layers,
         )
 
-        # === Speculative Decoding Setup ===
-        # TODO(guozixu): temp recalculate is_first_peer
-        # Calculate is_first_peer and is_last_peer early (needed for draft model loading)
-        # These will be set again in super().__init__(), but we need them now
+        # Speculative Decoding Setup
         self.is_first_peer = start_layer == 0
-        self.is_last_peer = end_layer == self.config.get("num_hidden_layers")
-
-        self.enable_speculative = draft_model is not None
+        self.enable_speculative = draft_model_repo is not None
         self.num_draft_tokens = num_draft_tokens
-        self.draft_model = draft_model
+        self.draft_model_repo = draft_model_repo
         self.draft_start_layer = draft_start_layer
         self.draft_end_layer = draft_end_layer
         self.draft_model_shard = None
@@ -199,7 +194,6 @@ class MLXExecutor(BaseExecutor):
         if self.enable_speculative:
             logger.info("Speculative decoding enabled")
 
-            # Use SpeculativeCacheManager (KVCache) for target model
             self.cache_manager = SpeculativeCacheManager(
                 num_layers=self.num_shard_layers,
                 max_seq_len=max_sequence_length or 2048,
@@ -208,20 +202,20 @@ class MLXExecutor(BaseExecutor):
                 dtype=self.dtype,
             )
 
-            # Set target model to use pure SDPA (no paged attention)
+            # Set target model to use pure SDPA
             for layer in self.model_shard.layers:
                 if hasattr(layer, "self_attn"):
                     layer.self_attn.use_paged_attention = False
 
             # Load draft model (only on first peer)
-            if self.is_first_peer and draft_model is not None:
-                logger.info(f"Loading draft model from {draft_model}")
+            if self.is_first_peer and self.enable_speculative:
+                logger.info(f"Loading draft model from {draft_model_repo}")
 
                 # Load full draft model (all layers)
                 self.draft_shard_loader = MLXModelLoader(
-                    draft_model,
+                    draft_model_repo,
                     start_layer=draft_start_layer,
-                    end_layer=draft_end_layer,  # Load all layers
+                    end_layer=draft_end_layer,
                     use_hfcache=use_hfcache,
                 )
                 self.draft_model_shard, draft_config, _ = self.draft_shard_loader.load()
@@ -349,7 +343,11 @@ class MLXExecutor(BaseExecutor):
                         )
                         continue
 
-                    # === Speculative Decoding: Handle Verification Results ===
+                    # Initialize for speculative decoding
+                    accepted_tokens = []
+                    bonus_token = None
+
+                    # Speculative Decoding: Handle Verification Results
                     if original_req.is_speculative and req.num_accepted_tokens > 0:
                         # TODO(guozixu): change to read num_accepted_tokens and next_token_id direct from req
                         # Parse verification results: [num_accepted, bonus_token]
@@ -388,44 +386,27 @@ class MLXExecutor(BaseExecutor):
                         original_req.output_ids.append(bonus_token)
                         logger.debug(f"Added bonus token: {bonus_token}")
 
-                        # Rollback KV cache (remove rejected draft tokens)
-                        if isinstance(self.cache_manager, SpeculativeCacheManager):
-                            # Cache currently contains: [prompt, old_tokens, ALL_draft_tokens]
-                            # We want: [prompt, old_tokens, accepted_draft_tokens]
-                            # Note: bonus_token is NOT in cache yet, it will be added in next iteration
-                            # Target length = original_length + num_accepted
-                            new_length = original_length + num_accepted
-
-                            # Rollback target cache to new_length (removes rejected tokens)
-                            self.cache_manager.rollback_to_position(
-                                original_req.request_id, new_length
-                            )
-                            logger.debug(
-                                f"Rolled back target cache for {req.request_id} "
-                                f"from {original_length + num_draft_tokens} to {new_length}"
-                            )
-
-                            # Rollback draft cache: matches mlx-lm's trim formula
-                            # trim_amount = max(num_draft - num_accept - 1, 0)
-                            # draft_new_length = original_length + num_draft - trim_amount
-                            #                  = original_length + num_draft - max(num_draft - num_accept - 1, 0)
-                            #                  = original_length + min(num_accept + 1, num_draft)
-                            # Simplified: original_length + num_accepted (when num_accepted < num_draft)
-                            #             original_length + num_draft - 1 (when all accepted)
-                            if isinstance(self.draft_cache_manager, SpeculativeCacheManager):
-                                if num_accepted == num_draft_tokens:
-                                    # All tokens accepted: keep all but the last one
-                                    draft_new_length = original_length + num_draft_tokens - 1
-                                else:
-                                    # Some rejected: keep only accepted tokens
-                                    draft_new_length = original_length + num_accepted
-
-                                self.draft_cache_manager.rollback_to_position(
-                                    original_req.request_id, draft_new_length
-                                )
-                                logger.debug(
-                                    f"Rolled back draft cache for {req.request_id} to {draft_new_length}"
-                                )
+                        # Remove rejected draft tokens)
+                        new_length = original_length + num_accepted
+                        # Rollback target cache
+                        self.cache_manager.rollback_to_position(original_req.request_id, new_length)
+                        logger.debug(
+                            f"Rolled back target cache for {req.request_id} "
+                            f"from {original_length + num_draft_tokens} to {new_length}"
+                        )
+                        # Rollback draft cache
+                        if num_accepted == num_draft_tokens:
+                            # All tokens accepted: keep all but the last one
+                            draft_new_length = original_length + num_draft_tokens - 1
+                        else:
+                            # Some rejected: keep only accepted tokens
+                            draft_new_length = original_length + num_accepted
+                        self.draft_cache_manager.rollback_to_position(
+                            original_req.request_id, draft_new_length
+                        )
+                        logger.debug(
+                            f"Rolled back draft cache for {req.request_id} to {draft_new_length}"
+                        )
 
                         # Clear draft tokens
                         original_req.draft_token_ids = None
@@ -435,36 +416,7 @@ class MLXExecutor(BaseExecutor):
                         original_req.update_status(RequestStatus.SPECULATIVE)
                         logger.debug(f"Request {req.request_id} status changed to SPECULATIVE")
 
-                        # Send all generated tokens to HTTP server
-                        if self.tp_rank == 0:
-                            # Send accepted draft tokens + bonus token
-                            tokens_to_send = accepted_tokens + [bonus_token]
-
-                            for token_id in tokens_to_send:
-                                req_dict = {
-                                    "prompt_tokens": len(req.input_ids),
-                                    "next_token_id": token_id,
-                                    "rid": req.request_id,
-                                }
-                                if original_req.status == RequestStatus.FINISHED_EOS:
-                                    req_dict["eos"] = True
-                                if original_req.status == RequestStatus.FINISHED_MAX_LENGTH:
-                                    req_dict["length"] = True
-                                if original_req.status == RequestStatus.FINISHED_ABORT:
-                                    req_dict["abort"] = True
-
-                                if self.enable_weight_refit:
-                                    req_dict["weight_version"] = self.weight_version
-                                if hasattr(self, "send_to_ipc_socket"):
-                                    self.send_to_ipc_socket.send_pyobj(req_dict)
-
-                            logger.debug(
-                                f"Sent {len(tokens_to_send)} tokens to HTTP server for {req.request_id}"
-                            )
-
                     elif not req.abort and req.next_token_id is not None:
-                        # Normal decoding path
-                        # Pass enable_speculative flag for proper status transition
                         original_req.commit_new_token(
                             req.next_token_id, enable_speculative=self.enable_speculative
                         )
@@ -488,31 +440,42 @@ class MLXExecutor(BaseExecutor):
                         self.scheduler.enque_request(original_req)
 
                     # detokenize and send to http server
-                    # Skip if we already sent tokens in speculative handling above
-                    if self.tp_rank == 0 and not (
-                        original_req.is_speculative and req.num_accepted_tokens > 0
-                    ):
-                        # Only send token if it's valid
-                        token_to_send = req.next_token_id if req.next_token_id is not None else -1
-                        req_dict = {
-                            "prompt_tokens": len(req.input_ids),
-                            "next_token_id": token_to_send,
-                            "rid": req.request_id,
-                        }
-                        if original_req.status == RequestStatus.FINISHED_EOS:
-                            req_dict["eos"] = True
-                        if original_req.status == RequestStatus.FINISHED_MAX_LENGTH:
-                            req_dict["length"] = True
-                        if original_req.status == RequestStatus.FINISHED_ABORT:
-                            req_dict["abort"] = True
+                    if self.tp_rank == 0:
+                        # Determine tokens to send based on request type
+                        if original_req.is_speculative and req.num_accepted_tokens > 0:
+                            # Speculative decoding: send accepted draft tokens + bonus token
+                            tokens_to_send = accepted_tokens + [bonus_token]
+                        elif req.next_token_id is not None:
+                            # Normal decoding: send single token
+                            tokens_to_send = [req.next_token_id]
+                        else:
+                            tokens_to_send = []
 
-                        # Add prob value for the sampled token (if requested and available)
-                        if original_req.return_probs and req.token_prob is not None:
-                            req_dict["probs"] = req.token_prob
-                        if self.enable_weight_refit:
-                            req_dict["weight_version"] = self.weight_version
-                        if hasattr(self, "send_to_ipc_socket"):
-                            self.send_to_ipc_socket.send_pyobj(req_dict)
+                        for token_id in tokens_to_send:
+                            req_dict = {
+                                "prompt_tokens": len(req.input_ids),
+                                "next_token_id": token_id,
+                                "rid": req.request_id,
+                            }
+                            if original_req.status == RequestStatus.FINISHED_EOS:
+                                req_dict["eos"] = True
+                            if original_req.status == RequestStatus.FINISHED_MAX_LENGTH:
+                                req_dict["length"] = True
+                            if original_req.status == RequestStatus.FINISHED_ABORT:
+                                req_dict["abort"] = True
+
+                            # Add prob value for the sampled token (if requested and available)
+                            if original_req.return_probs and req.token_prob is not None:
+                                req_dict["probs"] = req.token_prob
+                            if self.enable_weight_refit:
+                                req_dict["weight_version"] = self.weight_version
+                            if hasattr(self, "send_to_ipc_socket"):
+                                self.send_to_ipc_socket.send_pyobj(req_dict)
+
+                        if tokens_to_send:
+                            logger.debug(
+                                f"Sent {len(tokens_to_send)} tokens to HTTP server for {req.request_id}"
+                            )
                 else:
                     raise TypeError(f"First peer received unexpected request type: {type(req)}")
 
