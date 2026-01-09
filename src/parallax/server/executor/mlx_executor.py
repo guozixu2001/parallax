@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mlx.core as mx
 
-from parallax.server.cache_manager import CacheManager
 from parallax.server.cache.speculative_cache_manager import SpeculativeCacheManager
+from parallax.server.cache_manager import CacheManager
 from parallax.server.executor.base_executor import BaseExecutor
 from parallax.server.request import (
     InitialRequest,
@@ -210,7 +210,7 @@ class MLXExecutor(BaseExecutor):
 
             # Set target model to use pure SDPA (no paged attention)
             for layer in self.model_shard.layers:
-                if hasattr(layer, 'self_attn'):
+                if hasattr(layer, "self_attn"):
                     layer.self_attn.use_paged_attention = False
 
             # Load draft model (only on first peer)
@@ -228,14 +228,14 @@ class MLXExecutor(BaseExecutor):
 
                 # Set draft model to use SDPA
                 for layer in self.draft_model_shard.layers:
-                    if hasattr(layer, 'self_attn'):
+                    if hasattr(layer, "self_attn"):
                         layer.self_attn.use_paged_attention = False
 
                 # Create draft cache manager
-                draft_num_layers = draft_config.get('num_hidden_layers')
-                draft_num_kv_heads = draft_config.get('num_key_value_heads')
-                draft_head_dim = draft_config.get('head_dim') or (
-                    draft_config.get('hidden_size') // draft_config.get('num_attention_heads')
+                draft_num_layers = draft_config.get("num_hidden_layers")
+                draft_num_kv_heads = draft_config.get("num_key_value_heads")
+                draft_head_dim = draft_config.get("head_dim") or (
+                    draft_config.get("hidden_size") // draft_config.get("num_attention_heads")
                 )
 
                 self.draft_cache_manager = SpeculativeCacheManager(
@@ -371,7 +371,9 @@ class MLXExecutor(BaseExecutor):
                         # Calculate original length BEFORE modifying output_ids
                         # This is the cache length before accepting any draft tokens
                         original_length = original_req.total_length
-                        num_draft_tokens = len(original_req.draft_token_ids) if original_req.draft_token_ids else 0
+                        num_draft_tokens = (
+                            len(original_req.draft_token_ids) if original_req.draft_token_ids else 0
+                        )
 
                         # Accept draft tokens
                         accepted_tokens = []
@@ -464,8 +466,7 @@ class MLXExecutor(BaseExecutor):
                         # Normal decoding path
                         # Pass enable_speculative flag for proper status transition
                         original_req.commit_new_token(
-                            req.next_token_id,
-                            enable_speculative=self.enable_speculative
+                            req.next_token_id, enable_speculative=self.enable_speculative
                         )
 
                     if len(req.routing_table) > 0:
@@ -488,7 +489,9 @@ class MLXExecutor(BaseExecutor):
 
                     # detokenize and send to http server
                     # Skip if we already sent tokens in speculative handling above
-                    if self.tp_rank == 0 and not (original_req.is_speculative and req.num_accepted_tokens > 0):
+                    if self.tp_rank == 0 and not (
+                        original_req.is_speculative and req.num_accepted_tokens > 0
+                    ):
                         # Only send token if it's valid
                         token_to_send = req.next_token_id if req.next_token_id is not None else -1
                         req_dict = {
@@ -643,7 +646,9 @@ class MLXExecutor(BaseExecutor):
         # Intermediate peer: return hidden states without probs
         return {"hidden_states": hidden_states, "probs": None}
 
-    def _verify_and_sample(self, hidden_states: mx.array, requests: List[Request]) -> Dict[str, Any]:
+    def _verify_and_sample(
+        self, hidden_states: mx.array, requests: List[Request]
+    ) -> Dict[str, Any]:
         """
         Verify draft tokens and generate bonus token (on last peer).
 
@@ -730,7 +735,7 @@ class MLXExecutor(BaseExecutor):
                 next_token_id = int(flattened[0])
         return next_token_id, hidden_states
 
-    # TODO(guozixu): check correctness  
+    # TODO(guozixu): check correctness
     def _prepare_next_single_request(
         self, request: Request, hidden_states: Any, token_prob: Optional[float] = None
     ) -> Request:
@@ -763,7 +768,7 @@ class MLXExecutor(BaseExecutor):
             return IntermediateRequest(
                 request_id=request.request_id,
                 status=next_status,
-                # TODO(guozixu): in speculative decoding, 
+                # TODO(guozixu): in speculative decoding,
                 # the current_position should be total_length + num_draft_tokens
                 # but `current_position` seems not used anywhere
                 current_position=request.total_length + 1,
@@ -773,8 +778,8 @@ class MLXExecutor(BaseExecutor):
                 routing_table=request.routing_table,
                 lora_path=request.lora_path,
                 token_prob=token_prob,
-                draft_token_ids=getattr(request, 'draft_token_ids', None),
-                num_accepted_tokens=getattr(request, 'num_accepted_tokens', 0),
+                draft_token_ids=getattr(request, "draft_token_ids", None),
+                num_accepted_tokens=getattr(request, "num_accepted_tokens", 0),
             )
         if self.is_last_peer:
             # Last peer decodes a token and sends it back to the first peer.
@@ -803,14 +808,16 @@ class MLXExecutor(BaseExecutor):
                 routing_table=request.routing_table,
                 lora_path=request.lora_path,
                 token_prob=token_prob,
-                draft_token_ids=getattr(request, 'draft_token_ids', None),
-                num_accepted_tokens=getattr(request, 'num_accepted_tokens', 0),
+                draft_token_ids=getattr(request, "draft_token_ids", None),
+                num_accepted_tokens=getattr(request, "num_accepted_tokens", 0),
             )
 
         # For first peer (not last) and intermediate peers, use parent class logic
         return super()._prepare_next_single_request(request, hidden_states, token_prob)
 
-    def _prepare_speculative_batch(self, batched_requests: List[Request]) -> Optional[Dict[str, Any]]:
+    def _prepare_speculative_batch(
+        self, batched_requests: List[Request]
+    ) -> Optional[Dict[str, Any]]:
         """
         Prepare speculative decoding batch.
 
@@ -828,7 +835,9 @@ class MLXExecutor(BaseExecutor):
 
         # === First Peer: Draft Phase ===
         if self.is_first_peer and self.enable_speculative:
-            logger.debug(f"First peer: Generating draft tokens for {len(batched_requests)} requests")
+            logger.debug(
+                f"First peer: Generating draft tokens for {len(batched_requests)} requests"
+            )
 
             draft_tokens_list = []
             valid_requests = []
@@ -847,18 +856,25 @@ class MLXExecutor(BaseExecutor):
 
                     # Prefill draft cache with the same tokens
                     # TODO(guozixu): prefill should be a standalone function in **/speculative
-                    logger.debug(f"Prefilling draft cache for {req.request_id} with {len(req.input_ids)} tokens")
+                    logger.debug(
+                        f"Prefilling draft cache for {req.request_id} with {len(req.input_ids)} tokens"
+                    )
                     prefill_input = mx.array([req.input_ids])
 
                     # Create causal mask for prefill
                     from parallax.utils.utils import create_causal_mask
-                    prefill_mask = create_causal_mask(len(req.input_ids), len(req.input_ids), self.dtype)
+
+                    prefill_mask = create_causal_mask(
+                        len(req.input_ids), len(req.input_ids), self.dtype
+                    )
 
                     # Get draft layer caches
                     draft_layer_caches = self.draft_cache_manager.request_caches[req.request_id]
 
                     # Debug: Check cache types
-                    logger.warning(f"Draft layer caches type: {type(draft_layer_caches)}, length: {len(draft_layer_caches)}")
+                    logger.warning(
+                        f"Draft layer caches type: {type(draft_layer_caches)}, length: {len(draft_layer_caches)}"
+                    )
                     if len(draft_layer_caches) > 0:
                         logger.warning(f"First layer cache type: {type(draft_layer_caches[0])}")
 
@@ -870,7 +886,7 @@ class MLXExecutor(BaseExecutor):
                         block_tables=None,
                         context_lengths=None,
                         slot_mapping=None,
-                 )
+                    )
 
                     # Note: KVCache tracks offset internally via update_and_fetch()
                     # No need to manually set current_length
@@ -905,13 +921,13 @@ class MLXExecutor(BaseExecutor):
 
         # === Pipeline Peers: Verify Phase ===
         else:
-            logger.debug(f"Pipeline peer: Preparing verification for {len(batched_requests)} requests")
+            logger.debug(
+                f"Pipeline peer: Preparing verification for {len(batched_requests)} requests"
+            )
             return self._prepare_verify_batch(batched_requests, None)
 
     def _prepare_verify_batch(
-        self,
-        batched_requests: List[Request],
-        draft_tokens_list: Optional[List[List[int]]] = None
+        self, batched_requests: List[Request], draft_tokens_list: Optional[List[List[int]]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Prepare batch for target model verification.
@@ -966,7 +982,11 @@ class MLXExecutor(BaseExecutor):
 
         # Pad inputs (if first peer)
         if self.is_first_peer:
-            from parallax.server.executor.mlx_executor import pad_inputs, create_causal_mask, combine_padding_and_causal_masks
+            from parallax.server.executor.mlx_executor import (
+                combine_padding_and_causal_masks,
+                create_causal_mask,
+                pad_inputs,
+            )
 
             padded_inputs, padding_mask = pad_inputs(
                 self.pad_token_id, h_or_tokens_list, self.dtype
@@ -1004,7 +1024,7 @@ class MLXExecutor(BaseExecutor):
             padded_inputs = mx.concatenate(h_or_tokens_list, axis=0)
             batch_size = len(valid_requests)
             # Reshape to (batch, seq_len, hidden_dim)
-            padded_inputs = padded_inputs.reshape(batch_size, -1, self.config.get('hidden_size'))
+            padded_inputs = padded_inputs.reshape(batch_size, -1, self.config.get("hidden_size"))
             mask = None
 
         # Prepare caches for model forward
@@ -1033,7 +1053,9 @@ class MLXExecutor(BaseExecutor):
             "block_tables": None,  # Not used in speculative mode
             "context_lengths": context_lengths_tensor,  # Needed for cache management
             "slot_mapping": None,  # Not used in speculative mode
-            "prefix_lens": mx.array([cache_len], dtype=mx.int32) if request_id else None,  # RoPE starting position
+            "prefix_lens": (
+                mx.array([cache_len], dtype=mx.int32) if request_id else None
+            ),  # RoPE starting position
         }
 
     def _prepare_prefill_batch(self, batched_requests: List[Request]) -> Dict[str, Any]:
@@ -1168,7 +1190,7 @@ class MLXExecutor(BaseExecutor):
 
         # Prepare state slot mapping if needed
         state_slot_mapping = None
-        if hasattr(self.cache_manager, 'needs_slots') and self.cache_manager.needs_slots:
+        if hasattr(self.cache_manager, "needs_slots") and self.cache_manager.needs_slots:
             req_ids = [r.request_id for r in batched_requests]
             slots = [self.cache_manager.get_slot(rid) for rid in req_ids]
             state_slot_mapping = mx.array(slots, dtype=mx.int32)

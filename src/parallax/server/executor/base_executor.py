@@ -382,7 +382,9 @@ class BaseExecutor:
         if decode_batch is not None:
             logger.debug(f"Prepared decode batch with {len(decode_batch['requests'])} requests.")
         if speculative_batch is not None:
-            logger.debug(f"Prepared speculative batch with {len(speculative_batch['requests'])} requests.")
+            logger.debug(
+                f"Prepared speculative batch with {len(speculative_batch['requests'])} requests."
+            )
         return {
             "prefill_batch": prefill_batch,
             "decode_batch": decode_batch,
@@ -429,7 +431,7 @@ class BaseExecutor:
                     elif src_request.is_speculative:
                         # Speculative verification: K+1 tokens (draft + bonus)
                         # Extract K+1 hidden states for this request
-                        draft_tokens = getattr(src_request, 'draft_token_ids', None)
+                        draft_tokens = getattr(src_request, "draft_token_ids", None)
                         if draft_tokens:
                             num_tokens = len(draft_tokens) + 1  # K draft + 1 bonus
                         else:

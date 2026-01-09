@@ -5,6 +5,7 @@ Draft token generation for speculative decoding.
 from typing import List, Optional
 
 import mlx.core as mx
+
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -35,9 +36,7 @@ class DraftGenerator:
         self.cache_manager = cache_manager
         self.max_draft_tokens = max_draft_tokens
 
-        logger.debug(
-            f"DraftGenerator initialized: max_draft_tokens={max_draft_tokens}"
-        )
+        logger.debug(f"DraftGenerator initialized: max_draft_tokens={max_draft_tokens}")
 
     def generate_draft_tokens(
         self,

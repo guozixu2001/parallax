@@ -3,7 +3,8 @@ Continuous KV Cache using concatenate strategy (non-paged).
 Used for speculative decoding with SDPA.
 """
 
-from typing import List, Optional, Tuple
+from typing import Tuple
+
 import mlx.core as mx
 
 
@@ -25,13 +26,7 @@ class ContinuousKVCache:
         current_length: Current length of cached sequence
     """
 
-    def __init__(
-        self,
-        max_seq_len: int,
-        num_kv_heads: int,
-        head_dim: int,
-        dtype: type
-    ):
+    def __init__(self, max_seq_len: int, num_kv_heads: int, head_dim: int, dtype: type):
         """
         Initialize ContinuousKVCache.
 
@@ -47,19 +42,13 @@ class ContinuousKVCache:
         self.dtype = dtype
 
         # Initialize empty KV cache
-        self.key_cache = mx.zeros(
-            (1, max_seq_len, num_kv_heads, head_dim), dtype=dtype
-        )
-        self.value_cache = mx.zeros(
-            (1, max_seq_len, num_kv_heads, head_dim), dtype=dtype
-        )
+        self.key_cache = mx.zeros((1, max_seq_len, num_kv_heads, head_dim), dtype=dtype)
+        self.value_cache = mx.zeros((1, max_seq_len, num_kv_heads, head_dim), dtype=dtype)
 
         # Current length
         self.current_length = 0
 
-    def append(
-        self, keys: mx.array, values: mx.array
-    ) -> Tuple[mx.array, mx.array]:
+    def append(self, keys: mx.array, values: mx.array) -> Tuple[mx.array, mx.array]:
         """
         Append new KV pairs to cache.
 
@@ -73,7 +62,9 @@ class ContinuousKVCache:
         batch, num_tokens, num_kv_heads, head_dim = keys.shape
 
         # Check dimensions
-        assert num_kv_heads == self.num_kv_heads, f"Expected {self.num_kv_heads} KV heads, got {num_kv_heads}"
+        assert (
+            num_kv_heads == self.num_kv_heads
+        ), f"Expected {self.num_kv_heads} KV heads, got {num_kv_heads}"
         assert head_dim == self.head_dim, f"Expected {self.head_dim} head dim, got {head_dim}"
 
         # Check if we need to expand
@@ -140,17 +131,19 @@ class ContinuousKVCache:
             value_cache: (1, n_kv_heads, current_length, head_dim)
         """
         return (
-            self.key_cache[:, : self.current_length, :, :].transpose(0, 2, 1, 3),  # (1, n_kv_heads, seq_len, head_dim)
-            self.value_cache[:, : self.current_length, :, :].transpose(0, 2, 1, 3),  # (1, n_kv_heads, seq_len, head_dim)
+            self.key_cache[:, : self.current_length, :, :].transpose(
+                0, 2, 1, 3
+            ),  # (1, n_kv_heads, seq_len, head_dim)
+            self.value_cache[:, : self.current_length, :, :].transpose(
+                0, 2, 1, 3
+            ),  # (1, n_kv_heads, seq_len, head_dim)
         )
 
     def get_length(self) -> int:
         """Return current cache length."""
         return self.current_length
 
-    def get_slice(
-        self, start: int, end: int
-    ) -> Tuple[mx.array, mx.array]:
+    def get_slice(self, start: int, end: int) -> Tuple[mx.array, mx.array]:
         """
         Get a slice of the cache.
 
@@ -162,7 +155,9 @@ class ContinuousKVCache:
             Tuple of (key_cache_slice, value_cache_slice)
         """
         if start < 0 or end > self.current_length or start > end:
-            raise ValueError(f"Invalid slice range: [{start}, {end}), current_length={self.current_length}")
+            raise ValueError(
+                f"Invalid slice range: [{start}, {end}), current_length={self.current_length}"
+            )
 
         return (
             self.key_cache[:, start:end, :, :],

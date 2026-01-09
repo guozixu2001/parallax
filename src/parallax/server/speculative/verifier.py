@@ -5,14 +5,13 @@ Verification logic for speculative decoding.
 from typing import List, Tuple
 
 import mlx.core as mx
+
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-def verify_draft_tokens(
-    hidden_states: mx.array, draft_tokens: List[int]
-) -> Tuple[int, int]:
+def verify_draft_tokens(hidden_states: mx.array, draft_tokens: List[int]) -> Tuple[int, int]:
     """
     Verify K draft tokens and generate 1 bonus token.
 
@@ -41,8 +40,7 @@ def verify_draft_tokens(
 
     if hidden_states.shape[0] != K + 1:
         raise ValueError(
-            f"Expected hidden_states shape ({K+1}, vocab_size), "
-            f"got {hidden_states.shape}"
+            f"Expected hidden_states shape ({K+1}, vocab_size), " f"got {hidden_states.shape}"
         )
 
     num_accepted = 0
@@ -61,8 +59,7 @@ def verify_draft_tokens(
         else:
             # Reject: Mismatch found, reject this and all remaining drafts
             logger.debug(
-                f"Mismatch at position {k}: "
-                f"draft={draft_tokens[k]}, target={target_token}"
+                f"Mismatch at position {k}: " f"draft={draft_tokens[k]}, target={target_token}"
             )
             break
 
@@ -95,8 +92,7 @@ def verify_draft_tokens_batch(
     """
     if len(hidden_states_batch) != len(draft_tokens_batch):
         raise ValueError(
-            f"Batch size mismatch: "
-            f"{len(hidden_states_batch)} vs {len(draft_tokens_batch)}"
+            f"Batch size mismatch: " f"{len(hidden_states_batch)} vs {len(draft_tokens_batch)}"
         )
 
     results = []

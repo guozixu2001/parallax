@@ -371,9 +371,7 @@ class Scheduler:
             r.last_updated_time = time.time()
 
         if batch:
-            batch_info = [
-                f"{r.request_id}:{r.status.value}" for r in batch
-            ]
+            batch_info = [f"{r.request_id}:{r.status.value}" for r in batch]
             logger.debug(
                 "Form batch selected=%s inflight_tokens=%d (prefill=%d, speculative=%d, decode=%d)",
                 batch_info,

@@ -4,9 +4,10 @@ Uses mlx_lm's KVCache (concatenate-based) instead of paged KV cache.
 """
 
 from typing import Dict, List, Optional, Tuple
-import mlx.core as mx
 
+import mlx.core as mx
 from mlx_lm.models.cache import KVCache
+
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -130,7 +131,7 @@ class SpeculativeCacheManager:
             logger.debug("get_caches(): No requests allocated yet")
             return None
 
-      # Get the first request's cache objects (not tuples)
+        # Get the first request's cache objects (not tuples)
         first_request_id = next(iter(self.request_caches))
         caches = self.request_caches.get(first_request_id)
         logger.debug(
@@ -141,13 +142,13 @@ class SpeculativeCacheManager:
 
     def get_context_length(self, request_id: str) -> int:
         """
-        Get current context length for a request.
+         Get current context length for a request.
 
-        Args:
-       request_id: Request ID
+         Args:
+        request_id: Request ID
 
-        Returns:
-            Current context length, or 0 if request not found
+         Returns:
+             Current context length, or 0 if request not found
         """
         if request_id not in self.request_caches:
             return 0
@@ -171,9 +172,7 @@ class SpeculativeCacheManager:
             target_length: Target length to rollback to
         """
         if request_id not in self.request_caches:
-            logger.warning(
-                f"Attempted to rollback non-existent request {request_id}"
-            )
+            logger.warning(f"Attempted to rollback non-existent request {request_id}")
             return
 
         # Get current length from actual cache
@@ -184,9 +183,7 @@ class SpeculativeCacheManager:
             return
 
         if target_length < 0:
-            raise ValueError(
-                f"Target length must be >= 0, got {target_length}"
-            )
+            raise ValueError(f"Target length must be >= 0, got {target_length}")
 
         # Calculate how many tokens to trim
         num_to_trim = current_length - target_length
@@ -196,9 +193,7 @@ class SpeculativeCacheManager:
             layer_cache = self.request_caches[request_id][layer_idx]
             layer_cache.trim(num_to_trim)
 
-        logger.debug(
-            f"Rolled back request {request_id} from {current_length} to {target_length}"
-        )
+        logger.debug(f"Rolled back request {request_id} from {current_length} to {target_length}")
 
     def free_request(self, request_id: str):
         """
@@ -211,9 +206,7 @@ class SpeculativeCacheManager:
             del self.request_caches[request_id]
             logger.debug(f"Freed cache for request {request_id}")
 
-    def update_request_tokens(
-        self, request_id: str, token_ids: List[int]
-    ):
+    def update_request_tokens(self, request_id: str, token_ids: List[int]):
         """
         Update request tokens (for compatibility with prefix cache interface).
 
@@ -224,7 +217,6 @@ class SpeculativeCacheManager:
             token_ids: Token IDs to update
         """
         # Prefix cache not implemented in continuous mode
-        pass
 
     def __repr__(self) -> str:
         return (
