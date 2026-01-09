@@ -23,6 +23,7 @@ class DraftGenerator:
         draft_model,
         cache_manager,
         max_draft_tokens: int = 3,
+        dtype: str = "float16",
     ):
         """
         Initialize DraftGenerator.
@@ -31,12 +32,56 @@ class DraftGenerator:
             draft_model: Draft model instance (small model)
             cache_manager: Cache manager for draft model
             max_draft_tokens: Maximum number of draft tokens to generate
+            dtype: Data type for model operations
         """
         self.draft_model = draft_model
         self.cache_manager = cache_manager
         self.max_draft_tokens = max_draft_tokens
+        self.dtype = dtype
 
         logger.debug(f"DraftGenerator initialized: max_draft_tokens={max_draft_tokens}")
+
+    def prefill(
+        self,
+        request_id: str,
+        input_ids: List[int],
+    ):
+        """
+        Prefill draft model cache with input tokens.
+
+        Args:
+            request_id: Request ID
+            input_ids: Input token IDs to prefill
+        """
+        from parallax.utils.utils import create_causal_mask
+
+        logger.debug(f"Prefilling draft cache for {request_id} with {len(input_ids)} tokens")
+
+        # Prepare input
+        prefill_input = mx.array([input_ids])
+
+        # Create causal mask for prefill
+        prefill_mask = create_causal_mask(len(input_ids), len(input_ids), self.dtype)
+
+        # Get draft layer caches
+        draft_layer_caches = self.cache_manager.request_caches[request_id]
+
+        logger.debug(
+            f"Draft layer caches: type={type(draft_layer_caches)}, "
+            f"num_layers={len(draft_layer_caches)}"
+        )
+
+        # Run draft model prefill
+        _ = self.draft_model(
+            prefill_input,
+            cache=draft_layer_caches,
+            mask=prefill_mask,
+            block_tables=None,
+            context_lengths=None,
+            slot_mapping=None,
+        )
+
+        logger.debug(f"Prefill complete for request {request_id}")
 
     def generate_draft_tokens(
         self,
@@ -106,36 +151,3 @@ class DraftGenerator:
         )
 
         return draft_ids
-
-    def generate_prefill_draft_tokens(
-        self,
-        request_id: str,
-        input_tokens: List[int],
-        num_draft_tokens: Optional[int] = None,
-    ) -> List[int]:
-        """
-        Generate draft tokens from a prefill input.
-
-        This is used when the draft model needs to process a prefill phase
-        before generating draft tokens.
-
-        Args:
-            request_id: Request ID
-            input_tokens: Input token IDs for prefill
-            num_draft_tokens: Number of draft tokens to generate after prefill
-
-        Returns:
-            List of draft token IDs
-        """
-        if num_draft_tokens is None:
-            num_draft_tokens = self.max_draft_tokens
-
-        # Step 1: Run prefill phase
-        # TODO: Implement prefill phase with proper cache management
-
-        # Step 2: Generate draft tokens from the last token
-        if input_tokens:
-            last_token = input_tokens[-1]
-            return self.generate_draft_tokens(request_id, last_token, num_draft_tokens)
-        else:
-            return []

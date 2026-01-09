@@ -247,6 +247,7 @@ class MLXExecutor(BaseExecutor):
                     draft_model=self.draft_model_shard,
                     cache_manager=self.draft_cache_manager,
                     max_draft_tokens=self.num_draft_tokens,
+                    dtype=self.dtype,
                 )
 
         else:
@@ -800,42 +801,8 @@ class MLXExecutor(BaseExecutor):
                         logger.warning(f"Failed to allocate draft cache for {req.request_id}")
                         continue
 
-                    # Prefill draft cache with the same tokens
-                    # TODO(guozixu): prefill should be a standalone function in **/speculative
-                    logger.debug(
-                        f"Prefilling draft cache for {req.request_id} with {len(req.input_ids)} tokens"
-                    )
-                    prefill_input = mx.array([req.input_ids])
-
-                    # Create causal mask for prefill
-                    from parallax.utils.utils import create_causal_mask
-
-                    prefill_mask = create_causal_mask(
-                        len(req.input_ids), len(req.input_ids), self.dtype
-                    )
-
-                    # Get draft layer caches
-                    draft_layer_caches = self.draft_cache_manager.request_caches[req.request_id]
-
-                    # Debug: Check cache types
-                    logger.warning(
-                        f"Draft layer caches type: {type(draft_layer_caches)}, length: {len(draft_layer_caches)}"
-                    )
-                    if len(draft_layer_caches) > 0:
-                        logger.warning(f"First layer cache type: {type(draft_layer_caches[0])}")
-
-                    # Run draft model prefill
-                    _ = self.draft_model_shard(
-                        prefill_input,
-                        cache=draft_layer_caches,
-                        mask=prefill_mask,
-                        block_tables=None,
-                        context_lengths=None,
-                        slot_mapping=None,
-                    )
-
-                    # Note: KVCache tracks offset internally via update_and_fetch()
-                    # No need to manually set current_length
+                    # Prefill draft cache with input tokens
+                    self.draft_generator.prefill(req.request_id, req.input_ids)
 
                 # Generate K draft tokens using DraftGenerator
                 try:
