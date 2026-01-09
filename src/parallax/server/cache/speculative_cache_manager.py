@@ -44,8 +44,6 @@ class SpeculativeCacheManager:
         self.head_dim = head_dim
         self.dtype = dtype
 
-        # Layer caches (not per-request, shared template)
-        # We'll create per-request caches on demand
         self.request_caches: Dict[str, List[KVCache]] = {}
 
         # For compatibility with paged cache interface
@@ -77,7 +75,7 @@ class SpeculativeCacheManager:
             # Already allocated
             return True, 0
 
-        # Create KVCache for each layer (mlx_lm's KVCache doesn't need initialization params)
+        # Create KVCache for each layer
         layer_caches = [KVCache() for _ in range(self.num_layers)]
 
         self.request_caches[request_id] = layer_caches
@@ -92,58 +90,6 @@ class SpeculativeCacheManager:
     def has_request(self, request_id: str) -> bool:
         """Check if request exists in cache."""
         return request_id in self.request_caches
-
-    def append_tokens(
-        self,
-        request_id: str,
-        layer_idx: int,
-        keys: mx.array,
-        values: mx.array,
-    ):
-        """
-        Append KV pairs for a specific layer and request.
-        Note: This method is not used with mlx_lm's KVCache pattern.
-        The cache is updated via update_and_fetch() in the attention layer.
-
-        Args:
-            request_id: Request ID
-            layer_idx: Layer index
-            keys: (batch, num_tokens, num_kv_heads, head_dim)
-            values: (batch, num_tokens, num_kv_heads, head_dim)
-     """
-        if request_id not in self.request_caches:
-            raise ValueError(f"Request {request_id} not allocated")
-
-        if layer_idx < 0 or layer_idx >= self.num_layers:
-            raise ValueError(f"Invalid layer_idx: {layer_idx}, num_layers={self.num_layers}")
-
-        # Get layer cache
-        layer_cache = self.request_caches[request_id][layer_idx]
-
-        # Note: With mlx_lm's KVCache, we don't manually append
-        # The cache is updated via update_and_fetch() in the attention layer
-        logger.warning("append_tokens() called but not used with mlx_lm's KVCache pattern")
-
-    def append_slot(self, request_id: str) -> bool:
-        """
-        Allocate a slot for one more token (for compatibility with paged interface).
-
-        In KVCache, we don't pre-allocate slots. This method
-        is provided for API compatibility and always returns True.
-
-        Args:
-            request_id: Request ID
-
-        Returns:
-            True (always succeeds in continuous mode)
-        """
-        if request_id not in self.request_caches:
-            logger.warning(f"Attempted to append_slot for non-existent request {request_id}")
-            return False
-
-        # In continuous mode, we don't need to pre-allocate slots
-        # The actual KV will be appended when the model runs
-        return True
 
     def get_layer_cache(
         self, request_id: str, layer_idx: int
@@ -167,26 +113,6 @@ class SpeculativeCacheManager:
         layer_cache = self.request_caches[request_id][layer_idx]
         # KVCache.state returns (keys, values) tuple
         return layer_cache.state
-
-    def get_all_caches(
-        self, request_id: str
-    ) -> Optional[List[Tuple[mx.array, mx.array]]]:
-        """
-        Get all layer caches for a request.
-
-        Args:
-            request_id: Request ID
-
-        Returns:
-            List of (key_cache, value_cache) tuples for each layer, or None
-        """
-        if request_id not in self.request_caches:
-            return None
-
-        return [
-          layer_cache.state
-            for layer_cache in self.request_caches[request_id]
-        ]
 
     def get_caches(self) -> Optional[List[KVCache]]:
         """
@@ -285,21 +211,6 @@ class SpeculativeCacheManager:
             del self.request_caches[request_id]
             logger.debug(f"Freed cache for request {request_id}")
 
-    def get_block_table(self, request_id: str) -> List[int]:
-        """
-        Get block table for compatibility with paged interface.
-
-        In continuous mode, we return a dummy block table.
-
-        Args:
-            request_id: Request ID
-
-        Returns:
-            Empty list (not used in continuous mode)
-        """
-        # Not used in continuous mode, return empty list for compatibility
-        return []
-
     def update_request_tokens(
         self, request_id: str, token_ids: List[int]
     ):
@@ -313,18 +224,6 @@ class SpeculativeCacheManager:
             token_ids: Token IDs to update
         """
         # Prefix cache not implemented in continuous mode
-        pass
-
-    def insert_full_blocks_to_cache(self, request_id: str):
-        """
-        Insert full blocks to cache (for compatibility with paged interface).
-
-        Not applicable in continuous mode.
-
-        Args:
-            request_id: Request ID
-        """
-        # Not applicable in continuous mode
         pass
 
     def __repr__(self) -> str:

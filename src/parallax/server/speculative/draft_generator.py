@@ -65,9 +65,6 @@ class DraftGenerator:
         draft_ids = []
         current_input = mx.array([[last_token]])
 
-        # Get initial cache length
-        initial_cache_len = self.cache_manager.get_context_length(request_id)
-
         for step in range(num_tokens):
             # Get KV cache objects for this request (KVCache objects)
             if request_id not in self.cache_manager.request_caches:

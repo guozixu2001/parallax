@@ -958,12 +958,6 @@ class MLXExecutor(BaseExecutor):
                 # Intermediate peers: receive hidden states from previous peer
                 h_or_tokens_list.append(req.hidden_states)
 
-            # Pre-allocate slots for K+1 tokens (K draft + 1 bonus)
-            # Note: In KVCache mode, append_slot is a no-op
-            # The actual KV will be appended during model forward
-            for _ in range(len(draft_tokens) + 1):
-                self.cache_manager.append_slot(req.request_id)
-
             valid_requests.append(req)
 
         if not valid_requests:
