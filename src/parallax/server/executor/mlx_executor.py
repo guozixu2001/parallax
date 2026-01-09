@@ -349,17 +349,8 @@ class MLXExecutor(BaseExecutor):
 
                     # Speculative Decoding: Handle Verification Results
                     if original_req.is_speculative and req.num_accepted_tokens > 0:
-                        # TODO(guozixu): change to read num_accepted_tokens and next_token_id direct from req
-                        # Parse verification results: [num_accepted, bonus_token]
-                        # These are encoded in req.hidden_states as shape (1, 2) or (2,)
-                        if req.hidden_states.ndim == 2:
-                            # Shape is (1, 2)
-                            num_accepted = int(req.hidden_states[0, 0])
-                            bonus_token = int(req.hidden_states[0, 1])
-                        else:
-                            # Shape is (2,) - flattened
-                            num_accepted = int(req.hidden_states[0])
-                            bonus_token = int(req.hidden_states[1])
+                        num_accepted = req.num_accepted_tokens
+                        bonus_token = req.next_token_id
 
                         logger.debug(
                             f"Speculative result for {req.request_id}: "
@@ -620,7 +611,9 @@ class MLXExecutor(BaseExecutor):
             requests: List of speculative requests
 
         Returns:
-            Dict with [num_accepted, bonus_token] for each request
+            Dict with bonus_token for each request (as uint32 array).
+            Verification results (num_accepted, bonus_token) are stored directly
+            in request fields: req.num_accepted_tokens, req.next_token_id
         """
         from parallax.server.speculative.verifier import verify_draft_tokens
 
@@ -633,7 +626,7 @@ class MLXExecutor(BaseExecutor):
             if draft_tokens is None:
                 logger.error(f"No draft tokens for request {req.request_id}")
                 # Should not happen, but handle gracefully
-                results.append(mx.array([0, 0], dtype=mx.int32))
+                results.append(mx.array([0], dtype=mx.uint32))
                 continue
 
             # hidden_states[i] shape: (K+1, vocab_size)
@@ -645,6 +638,7 @@ class MLXExecutor(BaseExecutor):
 
                 # Update request with verification results
                 req.num_accepted_tokens = num_accepted
+                req.next_token_id = bonus_token
 
                 logger.debug(
                     f"Request {req.request_id}: "
@@ -652,15 +646,15 @@ class MLXExecutor(BaseExecutor):
                     f"bonus_token={bonus_token}"
                 )
 
-                # Encode results: [num_accepted, bonus_token]
-                results.append(mx.array([num_accepted, bonus_token], dtype=mx.int32))
+                # Return bonus token as uint32 for consistency with normal decoding
+                results.append(mx.array([bonus_token], dtype=mx.uint32))
 
             except Exception as e:
                 logger.exception(f"Error verifying request {req.request_id}: {e}")
-                # Return default values
-                results.append(mx.array([0, 0], dtype=mx.int32))
+                # Return default value
+                results.append(mx.array([0], dtype=mx.uint32))
 
-        # Stack results: (batch, 2) - [num_accepted, bonus_token]
+        # Stack results: (batch, 1) - bonus_token for each request
         results_tensor = mx.stack(results, axis=0)
 
         return {"hidden_states": results_tensor, "probs": None}
@@ -677,25 +671,14 @@ class MLXExecutor(BaseExecutor):
         """
         Extract token ID from hidden states (last peer only).
 
-        For normal decoding: hidden_states contains a single token ID
-        For speculative decoding: hidden_states contains [num_accepted, bonus_token]
+        Args:
+            hidden_states: uint32 array containing single token ID
 
         Returns token_id, hidden_states
         """
-        if hidden_states.dtype == mx.uint32:
-            # Normal decoding: single token ID
-            next_token_id = int(hidden_states[0])
+        next_token_id = int(hidden_states[0])
+        if hidden_states.dtype != mx.int32:
             hidden_states = hidden_states.astype(mx.int32)
-        else:
-            # For speculative decoding verification results: [num_accepted, bonus_token]
-            # Extract bonus_token (second element) as next_token_id
-            flattened = hidden_states.flatten()
-            if flattened.size >= 2:
-                # Speculative verification: extract bonus_token (second element)
-                next_token_id = int(flattened[1])
-            else:
-                # Regular decode: single token
-                next_token_id = int(flattened[0])
         return next_token_id, hidden_states
 
     # TODO(guozixu): check correctness

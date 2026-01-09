@@ -347,9 +347,8 @@ class Scheduler:
             if len(batch) >= self.micro_batch_size:
                 break
             # Speculative decoding cost: draft_tokens + verify_tokens
-            # Default to 1 if num_draft_tokens not set
             # TODO(guozixu): refine speculative cost model
-            cost = getattr(req, "num_draft_tokens", 1)
+            cost = getattr(req, "num_draft_tokens", 3) + 1
             if cost + inflight_tokens > self.max_num_tokens_per_batch:
                 continue
             batch.append(req)
