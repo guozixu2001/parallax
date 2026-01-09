@@ -282,6 +282,35 @@ def parse_args() -> argparse.Namespace:
         help="Whether to use local Hugging Face cache only (no network download)",
     )
 
+    # Speculative decoding configuration
+    parser.add_argument(
+        "--draft-model-repo",
+        type=str,
+        default=None,
+        help="Draft model repository for speculative decoding (e.g., 'mlx-community/Qwen3-0.6B-bf16')",
+    )
+
+    parser.add_argument(
+        "--draft-start-layer",
+        type=int,
+        default=0,
+        help="Starting layer index for draft model (default: 0, full model)",
+    )
+
+    parser.add_argument(
+        "--draft-end-layer",
+        type=int,
+        default=None,
+        help="Ending layer index for draft model (default: None, all layers)",
+    )
+
+    parser.add_argument(
+        "--num-draft-tokens",
+        type=int,
+        default=3,
+        help="Number of draft tokens to generate per step in speculative decoding",
+    )
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -345,3 +374,12 @@ def validate_args(args: argparse.Namespace) -> None:
     ]
     if args.dtype not in dtype_list:
         raise ValueError(f"Unsupported dtype: {args.dtype}. Supported dtypes: {dtype_list}")
+
+    # Validate speculative decoding arguments
+    if args.draft_model_repo is not None:
+        if args.num_draft_tokens <= 0:
+            raise ValueError("num_draft_tokens must be positive when using speculative decoding")
+        if args.draft_start_layer < 0:
+            raise ValueError("draft_start_layer must be non-negative")
+        if args.draft_end_layer is not None and args.draft_end_layer <= args.draft_start_layer:
+            raise ValueError("draft_end_layer must be greater than draft_start_layer")

@@ -53,6 +53,11 @@ def create_executor_config(args: argparse.Namespace, shared_state=None, conn=Non
         "lora_backend": args.lora_backend,
         "max_lora_chunk_size": args.max_lora_chunk_size,
         "enable_weight_refit": args.enable_weight_refit,
+        # Speculative decoding
+        "draft_model_repo": getattr(args, "draft_model_repo", None),
+        "draft_start_layer": getattr(args, "draft_start_layer", 0),
+        "draft_end_layer": getattr(args, "draft_end_layer", None),
+        "num_draft_tokens": getattr(args, "num_draft_tokens", 3),
     }
     return config
 

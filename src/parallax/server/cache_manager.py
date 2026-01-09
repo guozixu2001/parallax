@@ -761,6 +761,10 @@ class SpeculativeCacheManager:
 
         logger.debug(f"Rolled back request {request_id} from {current_length} to {target_length}")
 
+    def release_request(self, request_id: str):
+        """Release all resources for a request (alias for free_request)."""
+        self.free_request(request_id)
+
     def free_request(self, request_id: str):
         """
         Free all resources for a request.
