@@ -7,6 +7,9 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 from typing import List, Optional
 
 import torch
+from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+from sglang.srt.mem_cache.chunk_cache import ChunkCache, SWAChunkCache
+from sglang.srt.mem_cache.swa_memory_pool import SWATokenToKVPoolAllocator
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
@@ -26,51 +29,29 @@ from parallax_utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-class _NoPrefixCacheAdapter:
-    """Minimal tree-cache adapter when prefix cache is disabled.
+def _build_no_prefix_tree_cache(model_runner: ModelRunner):
+    """Build sglang-native no-prefix cache for allocation/scheduling.
 
-    Newer sglang versions call additional tree-cache methods (e.g.
-    supports_swa/supports_mamba) during extend allocation. This adapter
-    provides a stable no-cache surface so Parallax can run with prefix cache
-    disabled across sglang versions.
+    For hybrid SWA models (e.g. Step3.5), use SWAChunkCache so schedule_batch
+    can run SWA-specific eviction logic. For others, use ChunkCache.
     """
 
-    def __init__(self, model_runner: ModelRunner):
-        self.page_size = model_runner.server_args.page_size
-        self.device = model_runner.device
-        self.token_to_kv_pool_allocator = model_runner.token_to_kv_pool_allocator
-        self.req_to_token_pool = model_runner.req_to_token_pool
-        self.sliding_window_size = 0
+    sliding_window_size = getattr(model_runner, "sliding_window_size", None)
+    params = CacheInitParams(
+        disable=True,
+        req_to_token_pool=model_runner.req_to_token_pool,
+        token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+        page_size=model_runner.server_args.page_size,
+        chunked_prefill_size=getattr(model_runner.server_args, "chunked_prefill_size", None),
+        sliding_window_size=sliding_window_size,
+    )
 
-    def evict(self, *args, **kwargs):
-        return None
-
-    def supports_swa(self) -> bool:
-        return False
-
-    def supports_mamba(self) -> bool:
-        return False
-
-    def is_chunk_cache(self) -> bool:
-        return False
-
-    def evictable_size(self) -> int:
-        return 0
-
-    def full_evictable_size(self) -> int:
-        return 0
-
-    def swa_evictable_size(self) -> int:
-        return 0
-
-    def full_lru_list_evictable_size(self) -> int:
-        return 0
-
-    def swa_lru_list_evictable_size(self) -> int:
-        return 0
-
-    def pretty_print(self):
-        return None
+    is_swa_allocator = isinstance(
+        model_runner.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator
+    )
+    if is_swa_allocator and sliding_window_size is not None:
+        return SWAChunkCache(params)
+    return ChunkCache(params)
 
 
 def transform_sampling_params_to_sglang(old_params: ParallaxSamplingParams) -> SGLSamplingParams:
@@ -140,14 +121,15 @@ def form_sgl_batch_prefill(
 ) -> ForwardBatch:
     """Initialize a prefill ScheduleBatch -> ModelWorkerBatch -> ForwardBatch workflow"""
 
-    sgl_reqs = transform_requests_to_sglang(requests, page_tree_cache)
-
-    dummy_tree_cache = _NoPrefixCacheAdapter(model_runner)
+    tree_cache = page_tree_cache if page_tree_cache is not None else _build_no_prefix_tree_cache(
+        model_runner
+    )
+    sgl_reqs = transform_requests_to_sglang(requests, tree_cache)
     schedule_batch = ScheduleBatch.init_new(
         reqs=sgl_reqs,
         req_to_token_pool=model_runner.req_to_token_pool,
         token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-        tree_cache=page_tree_cache if page_tree_cache is not None else dummy_tree_cache,
+        tree_cache=tree_cache,
         model_config=model_runner.model_config,
         enable_overlap=False,
         spec_algorithm=SpeculativeAlgorithm.NONE,
