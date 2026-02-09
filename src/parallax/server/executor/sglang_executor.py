@@ -146,6 +146,11 @@ class SGLExecutor(BaseExecutor):
         logger.debug(
             f"SGLang model runner initialized. num_layers={self.config.get('num_hidden_layers')}"
         )
+        architectures = self.config.get("architectures", [])
+        self._preserve_pp_residual = any(
+            arch in ("Step3p5ForCausalLM", "Step3p5MTP") for arch in architectures
+        )
+        self._hidden_size = self.config.get("hidden_size", None)
 
         # Set device to specific CUDA device based on tp_rank
         # This ensures tensors are moved to the correct GPU
@@ -197,6 +202,33 @@ class SGLExecutor(BaseExecutor):
             )
         else:
             self.page_tree_cache = None
+
+    def _pack_pp_hidden_states(self, logits_output) -> torch.Tensor:
+        """Pack hidden states for inter-peer transfer.
+
+        For Step3p5, preserve residual explicitly to avoid quality regression.
+        For other models, keep existing behavior by folding residual into hidden states.
+        """
+        hidden_states = logits_output.tensors["hidden_states"]
+        residual = logits_output.tensors.get("residual", None)
+        if residual is None:
+            return hidden_states
+        if self._preserve_pp_residual:
+            return torch.cat([hidden_states, residual], dim=-1)
+        return hidden_states + residual
+
+    def _unpack_pp_hidden_states(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Unpack hidden states received from previous peer into (hidden, residual)."""
+        if (
+            self._preserve_pp_residual
+            and self._hidden_size is not None
+            and hidden_states.shape[-1] == self._hidden_size * 2
+        ):
+            return torch.split(hidden_states, self._hidden_size, dim=-1)
+        residual = torch.zeros(
+            hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        return hidden_states, residual
 
     def check_and_refit_weight(self, refit_weight_path: str):
         if self.tp_size > 1:
@@ -445,10 +477,7 @@ class SGLExecutor(BaseExecutor):
             return {"hidden_states": next_token_ids, "probs": token_probs}
         else:
             # Intermediate peer: return hidden states for next peer
-            # Note: SGLang stores hidden_states + residual separately
-            final_hidden_states = (
-                logits_output.tensors["hidden_states"] + logits_output.tensors["residual"]
-            )
+            final_hidden_states = self._pack_pp_hidden_states(logits_output)
             return {"hidden_states": final_hidden_states, "probs": None}
 
     def _release_request(self, rid: str):
@@ -553,7 +582,7 @@ class SGLExecutor(BaseExecutor):
         # Prepare PP proxy tensors
         pp_proxy_tensors = None
         if not self.is_first_peer:
-            hidden_states = torch.cat(
+            packed_hidden_states = torch.cat(
                 [
                     (
                         req.hidden_states
@@ -564,11 +593,7 @@ class SGLExecutor(BaseExecutor):
                 ],
                 dim=0,
             )
-
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+            hidden_states, residual = self._unpack_pp_hidden_states(packed_hidden_states)
 
             pp_proxy_tensors = PPProxyTensors(
                 {
@@ -632,7 +657,7 @@ class SGLExecutor(BaseExecutor):
         # Prepare PP proxy tensors
         pp_proxy_tensors = None
         if not self.is_first_peer:
-            hidden_states = torch.cat(
+            packed_hidden_states = torch.cat(
                 [
                     (
                         req.hidden_states
@@ -643,11 +668,7 @@ class SGLExecutor(BaseExecutor):
                 ],
                 dim=0,
             )
-
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+            hidden_states, residual = self._unpack_pp_hidden_states(packed_hidden_states)
 
             pp_proxy_tensors = PPProxyTensors(
                 {

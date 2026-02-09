@@ -1,3 +1,4 @@
+import inspect
 from typing import Optional
 
 import torch
@@ -38,7 +39,8 @@ def apply_step3p5_monkey_patch():
 
         pp_group = getattr(self, "pp_group", None) or get_pp_group()
         if pp_group.is_last_rank:
-            try:
+            logits_processor_sig = inspect.signature(self.logits_processor)
+            if "hidden_states_before_norm" in logits_processor_sig.parameters:
                 return self.logits_processor(
                     input_ids,
                     hidden_states,
@@ -46,8 +48,7 @@ def apply_step3p5_monkey_patch():
                     forward_batch,
                     hidden_states_before_norm=hidden_states_before_norm,
                 )
-            except TypeError:
-                return self.logits_processor(input_ids, hidden_states, self.lm_head, forward_batch)
+            return self.logits_processor(input_ids, hidden_states, self.lm_head, forward_batch)
         else:
             return hidden_states
 
