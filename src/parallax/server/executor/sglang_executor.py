@@ -442,14 +442,16 @@ class SGLExecutor(BaseExecutor):
                 token_probs = real_probs.cpu().float().tolist()
 
             # Return dict with token_ids and optional probs
-            return {"hidden_states": next_token_ids, "probs": token_probs}
+            return {"hidden_states": next_token_ids, "residual": None, "probs": token_probs}
         else:
-            # Intermediate peer: return hidden states for next peer
-            # Note: SGLang stores hidden_states + residual separately
-            final_hidden_states = (
-                logits_output.tensors["hidden_states"] + logits_output.tensors["residual"]
-            )
-            return {"hidden_states": final_hidden_states, "probs": None}
+            # Intermediate peer: forward PP proxy tensors to the next peer.
+            if isinstance(logits_output, PPProxyTensors):
+                return {
+                    "hidden_states": logits_output.tensors["hidden_states"],
+                    "residual": logits_output.tensors.get("residual"),
+                    "probs": None,
+                }
+            return {"hidden_states": logits_output, "residual": None, "probs": None}
 
     def _release_request(self, rid: str):
         """Release per-request resources in SGLang."""
@@ -553,22 +555,21 @@ class SGLExecutor(BaseExecutor):
         # Prepare PP proxy tensors
         pp_proxy_tensors = None
         if not self.is_first_peer:
-            hidden_states = torch.cat(
-                [
-                    (
-                        req.hidden_states
-                        if req.hidden_states.ndim == 2
-                        else req.hidden_states.unsqueeze(0)
-                    )
-                    for req in batched_requests
-                ],
-                dim=0,
-            )
+            hidden_state_tensors = []
+            residual_tensors = []
+            for req in batched_requests:
+                hs = req.hidden_states if req.hidden_states.ndim == 2 else req.hidden_states.unsqueeze(0)
+                hidden_state_tensors.append(hs)
 
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+                req_residual = getattr(req, "residual", None)
+                if req_residual is None:
+                    req_residual = torch.zeros_like(hs)
+                elif req_residual.ndim != hs.ndim:
+                    req_residual = req_residual.unsqueeze(0)
+                residual_tensors.append(req_residual)
+
+            hidden_states = torch.cat(hidden_state_tensors, dim=0)
+            residual = torch.cat(residual_tensors, dim=0)
 
             pp_proxy_tensors = PPProxyTensors(
                 {
@@ -632,22 +633,21 @@ class SGLExecutor(BaseExecutor):
         # Prepare PP proxy tensors
         pp_proxy_tensors = None
         if not self.is_first_peer:
-            hidden_states = torch.cat(
-                [
-                    (
-                        req.hidden_states
-                        if req.hidden_states.ndim == 2
-                        else req.hidden_states.unsqueeze(0)
-                    )
-                    for req in batched_requests
-                ],
-                dim=0,
-            )
+            hidden_state_tensors = []
+            residual_tensors = []
+            for req in batched_requests:
+                hs = req.hidden_states if req.hidden_states.ndim == 2 else req.hidden_states.unsqueeze(0)
+                hidden_state_tensors.append(hs)
 
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+                req_residual = getattr(req, "residual", None)
+                if req_residual is None:
+                    req_residual = torch.zeros_like(hs)
+                elif req_residual.ndim != hs.ndim:
+                    req_residual = req_residual.unsqueeze(0)
+                residual_tensors.append(req_residual)
+
+            hidden_states = torch.cat(hidden_state_tensors, dim=0)
+            residual = torch.cat(residual_tensors, dim=0)
 
             pp_proxy_tensors = PPProxyTensors(
                 {

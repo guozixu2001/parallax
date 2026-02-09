@@ -21,7 +21,8 @@ def request_to_proto(
 ) -> forward_pb2.ForwardRequest:
     """
     Convert a list of IntermediateRequest objects to a ForwardRequest protobuf message.
-    IntermediateRequest contains request_id, current_position, status, and hidden_states.
+    IntermediateRequest contains request_id, current_position, status, hidden_states,
+    and optional residual states for PP-compatible backends.
     """
     forward_request = forward_pb2.ForwardRequest()
     assert len(requests) > 0, "No requests to convert"
@@ -46,6 +47,8 @@ def request_to_proto(
 
         if request.hidden_states is not None:
             proto_req.hidden_states = tensor_to_bytes(request.hidden_states, device=device)
+        if hasattr(request, "residual") and request.residual is not None:
+            proto_req.residual = tensor_to_bytes(request.residual, device=device)
 
         if request.next_token_id is not None:
             proto_req.next_token_id = request.next_token_id
@@ -81,6 +84,9 @@ def proto_to_request(
         hidden_states = None
         if proto_req.hidden_states:
             hidden_states = bytes_to_tensor(proto_req.hidden_states, device)
+        residual = None
+        if hasattr(proto_req, "residual") and proto_req.residual:
+            residual = bytes_to_tensor(proto_req.residual, device)
 
         status = None
         if hidden_states is None:
@@ -108,6 +114,7 @@ def proto_to_request(
             status=status,
             input_ids=list(proto_req.input_ids),
             hidden_states=hidden_states,
+            residual=residual,
             routing_table=list(proto_req.routing_table),
             next_token_id=next_token_id,
             sampling_params=sampling_params,
