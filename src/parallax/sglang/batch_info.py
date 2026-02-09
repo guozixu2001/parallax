@@ -5,7 +5,6 @@ The following is the flow of data structures for a batch in SGLang:
 ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 """
 
-from types import SimpleNamespace
 from typing import List, Optional
 
 import torch
@@ -97,16 +96,58 @@ def form_sgl_batch_prefill(
 
     sgl_reqs = transform_requests_to_sglang(requests, page_tree_cache)
 
-    def dummy_evict(*args):
-        pass
+    class DummyTreeCache:
+        """Compat shim for ScheduleBatch when prefix cache is disabled."""
 
-    dummy_tree_cache = SimpleNamespace(
-        page_size=model_runner.server_args.page_size,
-        device=model_runner.device,
-        token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-        evictable_size=0,
-    )
-    dummy_tree_cache.evict = dummy_evict
+        def __init__(self, model_runner: ModelRunner):
+            self.page_size = model_runner.server_args.page_size
+            self.device = model_runner.device
+            self.token_to_kv_pool_allocator = model_runner.token_to_kv_pool_allocator
+            self.sliding_window_size = 0
+
+        def evict(self, *args, **kwargs):
+            return None
+
+        def supports_swa(self):
+            return False
+
+        def is_chunk_cache(self):
+            return False
+
+        def supports_mamba(self):
+            return False
+
+        def is_tree_cache(self):
+            return False
+
+        def evictable_size(self):
+            return 0
+
+        def full_evictable_size(self):
+            return 0
+
+        def swa_evictable_size(self):
+            return 0
+
+        def full_lru_list_evictable_size(self):
+            return 0
+
+        def swa_lru_list_evictable_size(self):
+            return 0
+
+        def protected_size(self):
+            return 0
+
+        def full_protected_size(self):
+            return 0
+
+        def swa_protected_size(self):
+            return 0
+
+        def pretty_print(self):
+            return None
+
+    dummy_tree_cache = DummyTreeCache(model_runner)
     schedule_batch = ScheduleBatch.init_new(
         reqs=sgl_reqs,
         req_to_token_pool=model_runner.req_to_token_pool,
