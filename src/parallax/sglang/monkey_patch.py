@@ -52,3 +52,9 @@ def apply_parallax_sglang_monkey_patch():
     )
 
     apply_glm4_moe_monkey_patch()
+
+    from parallax.sglang.monkey_patch_utils.step3p5_model import (
+        apply_step3p5_monkey_patch,
+    )
+
+    apply_step3p5_monkey_patch()
