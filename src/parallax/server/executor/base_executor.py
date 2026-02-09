@@ -660,20 +660,66 @@ class BaseExecutor:
         lora_path = raw_request.get("lora_path")
         return_probs = raw_request.get("return_probs", False)  # Get return_probs parameter
 
+        # Sampling params compatibility:
+        # 1) OpenAI-style top-level fields (temperature/top_p/...)
+        # 2) Legacy nested "sampling_params" fields
+        # Nested "sampling_params" takes precedence when both are provided.
         raw_sampling_params = raw_request.get("sampling_params")
-        if raw_sampling_params is None:
-            sampling_params = SamplingParams()
-        else:
-            # TODO: Support more sampling params
-            sampling_params = SamplingParams()
-            if "temperature" in raw_sampling_params:
-                sampling_params.temperature = raw_sampling_params["temperature"]
-            if "top_k" in raw_sampling_params:
-                sampling_params.top_k = raw_sampling_params["top_k"]
-            if "top_p" in raw_sampling_params:
-                sampling_params.top_p = raw_sampling_params["top_p"]
-            if "ignore_eos" in raw_sampling_params:
-                sampling_params.ignore_eos = raw_sampling_params["ignore_eos"]
+        merged_sampling_params = {}
+        openai_sampling_keys = [
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "ignore_eos",
+            "stop",
+            "stop_token_ids",
+            "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "json_schema",
+        ]
+        for key in openai_sampling_keys:
+            if key in raw_request and raw_request[key] is not None:
+                merged_sampling_params[key] = raw_request[key]
+
+        if raw_sampling_params is not None:
+            if not isinstance(raw_sampling_params, dict):
+                raise ValueError("sampling_params must be an object")
+            merged_sampling_params.update(raw_sampling_params)
+
+        sampling_params = SamplingParams()
+        # Keep scheduler-level and backend-level max token limits aligned.
+        sampling_params.max_new_tokens = max_new_tokens
+
+        if "temperature" in merged_sampling_params:
+            temperature = merged_sampling_params["temperature"]
+            if temperature == 0.0:
+                sampling_params.temperature = 1.0
+                if "top_k" not in merged_sampling_params:
+                    sampling_params.top_k = 1
+            else:
+                sampling_params.temperature = temperature
+        if "top_k" in merged_sampling_params:
+            sampling_params.top_k = merged_sampling_params["top_k"]
+        if "top_p" in merged_sampling_params:
+            sampling_params.top_p = merged_sampling_params["top_p"]
+        if "min_p" in merged_sampling_params:
+            sampling_params.min_p = merged_sampling_params["min_p"]
+        if "ignore_eos" in merged_sampling_params:
+            sampling_params.ignore_eos = merged_sampling_params["ignore_eos"]
+        if "stop" in merged_sampling_params:
+            sampling_params.stop_strs = merged_sampling_params["stop"]
+        if "stop_token_ids" in merged_sampling_params:
+            sampling_params.stop_token_ids = set(merged_sampling_params["stop_token_ids"])
+        if "repetition_penalty" in merged_sampling_params:
+            sampling_params.repetition_penalty = merged_sampling_params["repetition_penalty"]
+        if "presence_penalty" in merged_sampling_params:
+            sampling_params.presence_penalty = merged_sampling_params["presence_penalty"]
+        if "frequency_penalty" in merged_sampling_params:
+            sampling_params.frequency_penalty = merged_sampling_params["frequency_penalty"]
+        if "json_schema" in merged_sampling_params:
+            sampling_params.json_schema = merged_sampling_params["json_schema"]
 
         req = InitialRequest(
             request_id=rid,

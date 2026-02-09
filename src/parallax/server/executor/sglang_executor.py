@@ -146,6 +146,11 @@ class SGLExecutor(BaseExecutor):
         logger.debug(
             f"SGLang model runner initialized. num_layers={self.config.get('num_hidden_layers')}"
         )
+        architectures = self.config.get("architectures", []) if isinstance(self.config, dict) else []
+        self._requires_pp_residual_passthrough = any("Step3p5" in arch for arch in architectures)
+        self._model_hidden_size = (
+            int(self.config.get("hidden_size")) if isinstance(self.config, dict) else None
+        )
 
         # Set device to specific CUDA device based on tp_rank
         # This ensures tensors are moved to the correct GPU
@@ -197,6 +202,27 @@ class SGLExecutor(BaseExecutor):
             )
         else:
             self.page_tree_cache = None
+
+    def _build_pp_proxy_tensors(self, hidden_states: torch.Tensor) -> PPProxyTensors:
+        """Build PPProxyTensors from inter-stage payload.
+
+        For Step3.5 we need to preserve both hidden_states and residual between PP stages.
+        We pack them as [hidden || residual] on send and split here on receive.
+        """
+        residual = None
+        if (
+            self._requires_pp_residual_passthrough
+            and self._model_hidden_size is not None
+            and hidden_states.shape[-1] == self._model_hidden_size * 2
+        ):
+            hidden_states, residual = torch.split(
+                hidden_states, [self._model_hidden_size, self._model_hidden_size], dim=-1
+            )
+        else:
+            residual = torch.zeros(
+                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+            )
+        return PPProxyTensors({"hidden_states": hidden_states, "residual": residual})
 
     def check_and_refit_weight(self, refit_weight_path: str):
         if self.tp_size > 1:
@@ -445,7 +471,15 @@ class SGLExecutor(BaseExecutor):
             return {"hidden_states": next_token_ids, "probs": token_probs}
         else:
             # Intermediate peer: return hidden states for next peer
-            # Note: SGLang stores hidden_states + residual separately
+            # Note: SGLang stores hidden_states + residual separately.
+            # For Step3.5 PP, preserve both tensors across stages.
+            if self._requires_pp_residual_passthrough and hasattr(logits_output, "tensors"):
+                hs = logits_output.tensors.get("hidden_states")
+                rs = logits_output.tensors.get("residual")
+                if hs is not None and rs is not None:
+                    packed_hidden_states = torch.cat([hs, rs], dim=-1)
+                    return {"hidden_states": packed_hidden_states, "probs": None}
+
             final_hidden_states = (
                 logits_output.tensors["hidden_states"] + logits_output.tensors["residual"]
             )
@@ -564,18 +598,7 @@ class SGLExecutor(BaseExecutor):
                 ],
                 dim=0,
             )
-
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
-
-            pp_proxy_tensors = PPProxyTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
-            )
+            pp_proxy_tensors = self._build_pp_proxy_tensors(hidden_states)
             logger.debug(f"PP Proxy: hidden_states shape: {hidden_states.shape}")
 
         # Prepare lengths (common for both backends)
@@ -643,18 +666,7 @@ class SGLExecutor(BaseExecutor):
                 ],
                 dim=0,
             )
-
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
-
-            pp_proxy_tensors = PPProxyTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
-            )
+            pp_proxy_tensors = self._build_pp_proxy_tensors(hidden_states)
             logger.debug(f"PP Proxy: hidden_states shape: {hidden_states.shape}")
 
         # Prepare lengths (common for both backends)
